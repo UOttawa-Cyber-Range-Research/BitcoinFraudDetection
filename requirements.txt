@@ -1,0 +1,16 @@
+# install torch yourself
+numpy
+numpy
+pandas
+tqdm
+
+# for SQL and handling the data
+duckdb
+fsspec
+
+# if turn on tensorboard
+tensorboard
+torchmetrics
+
+base58
+python-dotenv
