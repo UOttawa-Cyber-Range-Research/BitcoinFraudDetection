@@ -13,22 +13,25 @@ from torch.nn import (
 )
                 
 class GPS(torch.nn.Module):
-    def __init__(self, channels: int, pe_dim: int, num_layers: int,
+    def __init__(self, channels: int, num_layers: int,
                  attn_type: str, attn_kwargs: Dict[str, Any]):
         super().__init__()
-
-        self.pe_lin = Linear(20, pe_dim)
-        self.pe_norm = BatchNorm1d(20)
-
+        
+        # Define the gps layers
         self.convs = ModuleList()
         for _ in range(num_layers):
+            # Define the sequential model for the GPS layer
             nn = Sequential(
                 Linear(channels, channels),
                 ReLU(),
                 Linear(channels, channels),
             )
+            
+            # Define the conv layer
             conv = GPSConv(channels, GINConv(nn), heads=4,
                            attn_type=attn_type, attn_kwargs=attn_kwargs)
+            
+            # Append the conv layer to the list
             self.convs.append(conv)
 
         self.mlp = Sequential(
@@ -39,15 +42,14 @@ class GPS(torch.nn.Module):
             Linear(channels // 4, 1),
         )
         
-        self.mpl_x = Linear(51, channels - pe_dim)
+        self.mpl_x = Linear(channels, channels)
 
-    def forward(self, x, edge_index, pe):
-        x_pe = self.pe_norm(pe)
-        x = torch.cat((self.mpl_x(x.squeeze(-1)), self.pe_lin(x_pe)), 1)
-
+    def forward(self, x, edge_index):
+        # Run the conv and get the output
         for conv in self.convs:
             x = conv(x, edge_index)
-            
+        
+        # Return the model
         return self.mlp(x)
     
     
@@ -59,8 +61,7 @@ def build_model(
     attn_kwargs = {'dropout': 0.2}
     if opt.model == 'gps':
         model = GPS(
-            channels=64,
-            pe_dim=opt.pe_dim,
+            channels=opt.input_dim,
             num_layers=opt.num_layers,
             attn_type="multihead",
             attn_kwargs=attn_kwargs,
@@ -109,7 +110,7 @@ def args(parser: argparse.ArgumentParser = argparse.ArgumentParser()):
         parser.add_argument('-num_layers', type=int, default=4)
         parser.add_argument('-pe_dim', type=int, default=8)
         parser.add_argument('-class_weight', type=int, default=10)
-        parser.add_argument('-lr', type=float, default=0.01)
+        parser.add_argument('-lr', type=float, default=1e-3)
     except argparse.ArgumentError:
         # jupyter sometimes remembers the parse, in this case just return
         pass

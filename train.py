@@ -40,6 +40,8 @@ def common_args():
 
     parser.add_argument('model') # first positional argument
     parser.add_argument('-model_path', default='data/models')
+    parser.add_argument('-rwpe', default=True)
+    parser.add_argument('-walk_length', default=21)
     parser.add_argument('-model_accum_grads', type=int, default=1)
     parser.add_argument('-data_path', default='data/dataset')
     parser.add_argument(
@@ -129,21 +131,21 @@ def train(
     _mvals = defaultdict(float)
 
     # for gradient 
-    optimizer.zero_grad()
-    _n = len(data) 
+    _n = len(data)
 
     # Maintain a meter for the loss value
+    itr = 0
     loss_meter = AverageMeter()
     for cnt, (k, v) in tqdm(enumerate(data.items()), total=len(data)):
         # Transform the dataset if gps
-        if model_name == "gps":
-            v = transform(v)
-        
-        # Collect the model output
         if transform:
-            out = model(v.x, v.edge_index, v.pe)
-        else:
-            out = model(v.x, v.edge_index)
+            v = transform(v)
+
+        # Zero the gradient
+        optimizer.zero_grad()
+        
+        # Pass
+        out = model(v.x, v.edge_index)
         
         # Find the loss value
         _lab = labelled[k]
@@ -167,16 +169,18 @@ def train(
         # Update the loss meter
         loss_meter.update(loss.item(), 1)
         
-        with warnings.catch_warnings(record=True) as w:
-            # Auroc (use the sklearn version)
+        try:
+            # Used by all metrics
+            common = torch.sigmoid(out[_lab]).detach().cpu()
+            
+            # Auroc
             _mvals['auroc'] += sklearn.metrics.roc_auc_score(
                 v.y[_lab].cpu(),
-                torch.sigmoid(out[_lab]).detach().cpu(),
+                common,
             )
             
-            # F1-score (use the sklearn version)
-            f1_help = torch.sigmoid(out[_lab]).detach().cpu()
-            f1_help = (f1_help > 0.5).long()
+            # F1-score
+            f1_help = (common > 0.5).long()
             _mvals['f1_score'] += sklearn.metrics.f1_score(
                 v.y[_lab].cpu().long().squeeze(),
                 f1_help.view(-1).squeeze(),
@@ -189,10 +193,15 @@ def train(
                     v.y_i[_lab].squeeze(),
                 ).items():
                     _mvals[k2] += v
+                    
+            # Increment the iterator
+            itr += 1
+        except:
+            pass
 
     return {
         'loss': loss_meter.avg,
-        **{k:v / len(data) for k,v in _mvals.items()},
+        **{k:v / itr for k,v in _mvals.items()},
     }
 
 @torch.no_grad()
@@ -214,18 +223,17 @@ def evaluate(
     # Evaluate
     for k, v in data.items():
         # Collect the model output
-        if model_name == "gps":
+        if transform:
             v = transform(v)
         
-        if transform:
-            out = model(v.x, v.edge_index, v.pe)
-        else:
-            out = model(v.x, v.edge_index)
-            
+        # Get the model output
+        out = model(v.x, v.edge_index)
+        
+        # Get the labelled indexes
         _lab = labelled[k]
         
+        # Get the metrics
         with warnings.catch_warnings(record=True) as w:
-
             # Auroc (use the sklearn version)
             _mvals['auroc'] += sklearn.metrics.roc_auc_score(
                 v.y[_lab].cpu(),
@@ -339,6 +347,17 @@ from utils import export_args
 def main(opt):
     # Fetch the dataset
     data, labelled, scaler, feature_names, n_features, class_weights = load_data(opt)
+    
+    # Check if the random walk is there or not
+    if opt.rwpe:
+        # Define the transforms here
+        transform = T.Compose([T.AddRandomWalkPE(walk_length=opt.walk_length,
+                                                 attr_name=None)])
+        
+        # Add the walk features to to the total feature for model construction
+        n_features += opt.walk_length
+    
+    print(f"Total features : {n_features}")
 
     # Define the input dims for the model
     opt.input_dim = n_features
@@ -354,7 +373,7 @@ def main(opt):
 
     # number of trainable parameters
     _mp = filter(lambda p: p.requires_grad, model.parameters())
-    print (f"number of trainable parameters: {sum([np.prod(p.size()) for p in _mp])}")
+    print (f"Number of trainable parameters: {sum([np.prod(p.size()) for p in _mp])}")
 
     # build the functions
     (train, evaluate, train_args) = build_functions(opt)
@@ -368,26 +387,22 @@ def main(opt):
     else:
         _external_writer = None
 
-    print ("training")
+    print ("Training started...")
     os.makedirs(
         opt.model_path, exist_ok=True
     )
     model_save_path = os.path.join(
         opt.model_path, f'{opt.model}.pt'
     )
-    print (f"saving model in \'{model_save_path}\'")
+    print (f"Saving model in \'{model_save_path}\'")
     
     # Define the placeholders for model training
     best = 0
-    best_test = None
     best_epoch = None
     best_metric = opt.train_best_metric
-    transform = None
-    
-    if opt.model == "gps":
-        transform = T.Compose([T.AddRandomWalkPE(walk_length=20, attr_name='pe')])
     
     # Start the model training
+    print(f"Transform before : {transform}")
     for epoch in range(1, 1 + opt.epochs):
         meta = train(
             model=model, data=data[DATA_LABEL_TRAIN], 

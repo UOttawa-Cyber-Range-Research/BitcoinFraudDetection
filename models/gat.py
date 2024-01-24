@@ -13,9 +13,9 @@ def args(parser: argparse.ArgumentParser = argparse.ArgumentParser()):
         # add stuff to parser
         parser.add_argument('-num_layers', type=int, default=3)
         parser.add_argument('-hidden_dim', type=int, default=128)
-        parser.add_argument('-heads', type=int, default=2)
-        parser.add_argument('-dropout', type=float, default=0.5)
-        parser.add_argument('-lr', type=float, default=0.01)
+        parser.add_argument('-heads', type=int, default=4)
+        parser.add_argument('-dropout', type=float, default=0.2)
+        parser.add_argument('-lr', type=float, default=1e-3)
         parser.add_argument('-class_weight', type=int, default=10)
     except argparse.ArgumentError:
         # jupyter sometimes remembers the parse, in this case just return
@@ -78,7 +78,7 @@ class GAT(torch.nn.Module):
         if self.emb == True:
             return x
 
-        return torch.sigmoid(x)
+        return x
 
 from typing import Optional
 

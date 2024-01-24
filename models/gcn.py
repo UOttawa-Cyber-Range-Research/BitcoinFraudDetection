@@ -13,11 +13,10 @@ def args(parser: argparse.ArgumentParser = argparse.ArgumentParser()):
         # add stuff to parser
         parser.add_argument('-num_layers', type=int, default=3)
         parser.add_argument('-hidden_dim', type=int, default=128)
-        parser.add_argument('-dropout', type=float, default=0.1)
-        parser.add_argument('-lr', type=float, default=0.01)
+        parser.add_argument('-dropout', type=float, default=0.2)
+        parser.add_argument('-lr', type=float, default=1e-3)
         parser.add_argument('-class_weight', type=int, default=10)
     except argparse.ArgumentError:
-        # jupyter sometimes remembers the parse, in this case just return
         pass
 
     return parser
