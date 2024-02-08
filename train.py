@@ -8,6 +8,7 @@ import argparse
 from typing import List, Optional
 import torch
 import sys, os
+import random
 import numpy as np
 from tqdm import tqdm
 from PIL import Image
@@ -33,6 +34,14 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+        
+def seed_everything(seed):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
 
 def common_args():
     import argparse
@@ -40,7 +49,7 @@ def common_args():
 
     parser.add_argument('model') # first positional argument
     parser.add_argument('-model_path', default='data/models')
-    parser.add_argument('-rwpe', default=True)
+    parser.add_argument('-rwpe', default=False)
     parser.add_argument('-walk_length', default=21)
     parser.add_argument('-model_accum_grads', type=int, default=1)
     parser.add_argument('-data_path', default='data/dataset')
@@ -55,11 +64,10 @@ def common_args():
     parser.add_argument('-additional_features', nargs='*')
     parser.add_argument('-train', action='store_false', default=True)
     parser.add_argument('-train_best_metric', default='bacc')
-    parser.add_argument('-epochs', type=int, default=10)
-    # parser.add_argument('-seed', type=int, default=None) # first positional argument
+    parser.add_argument('-epochs', type=int, default=12)
     parser.add_argument('-tensorboard', action='store_true', default=False)
-    parser.add_argument('-debug', action='store_true', default=False) # activate some debug functions
-    parser.add_argument('-refresh_cache', action='store_true', default=False) # Refreshes loader's cache
+    parser.add_argument('-debug', action='store_true', default=False)
+    parser.add_argument('-refresh_cache', action='store_true', default=False)
     return parser
 
 def parse_args(
@@ -121,7 +129,7 @@ def train(
     accum_gradients=1,
     device=torch.device("cpu"),
     transform=None,
-    model_name=None,
+    scheduler=None,
 ):
     model.train()
 
@@ -136,7 +144,7 @@ def train(
     # Maintain a meter for the loss value
     itr = 0
     loss_meter = AverageMeter()
-    for cnt, (k, v) in tqdm(enumerate(data.items()), total=len(data)):
+    for cnt, (k, v) in tqdm(enumerate(data.items()), total=len(data), disable=True):
         # Transform the dataset if gps
         if transform:
             v = transform(v)
@@ -156,15 +164,15 @@ def train(
 
         # Backprop
         loss.backward()
+        optimizer.step()
 
-        _cnt = cnt + 1
-        if (
-            ((_cnt % accum_gradients) == 0)
-            or
-            (_cnt == _n)
-        ):
-            optimizer.step()
-            optimizer.zero_grad()
+        # _cnt = cnt + 1
+        # if (
+        #     ((_cnt % accum_gradients) == 0)
+        #     or
+        #     (_cnt == _n)
+        # ):
+        #     optimizer.step()
 
         # Update the loss meter
         loss_meter.update(loss.item(), 1)
@@ -209,7 +217,6 @@ def evaluate(
     model, data, labelled, 
     device=torch.device("cpu"),
     transform=None,
-    model_name=None,
 ):
     # Put in eval mode
     model.eval()
@@ -312,22 +319,28 @@ def build_model_opt_loss(opt, class_weights):
             opt,
             class_weights=class_weights,
         )
+    elif opt.model == 'rggcn':
+        import models.rggcn
+        model, optimizer, loss = models.rggcn.build_model(
+            opt,
+            class_weights=class_weights,
+        )
+    elif opt.model == 'gs':
+        import models.gs
+        model, optimizer, loss = models.gs.build_model(
+            opt,
+            class_weights=class_weights,
+        )
+    elif opt.model == 'dgcn':
+        import models.dgcn
+        model, optimizer, loss = models.dgcn.build_model(
+            opt,
+            class_weights=class_weights,
+        )
     else:
         raise NotImplementedError
 
     return model, optimizer, loss
-
-# load model
-def load_model(opt, others: List[str]=[]):
-    if opt.model == 'gat':
-        import models.gat
-        return models.gat.load_model(
-            opt, 
-            model_path=os.path.join(opt.model_path, f"{opt.model}.pt"), 
-            others=others,
-        )
-    else:
-        raise NotImplementedError
 
 # build the train/eval functions
 def build_functions(opt):
@@ -341,21 +354,24 @@ def build_functions(opt):
 # ----------------------------------------------------------
 # MAIN
 # ----------------------------------------------------------
-
 from utils import export_args
 
-def main(opt):
+def main(opt):    
     # Fetch the dataset
     data, labelled, scaler, feature_names, n_features, class_weights = load_data(opt)
     
     # Check if the random walk is there or not
     if opt.rwpe:
+        print("Using Random Walks...")
         # Define the transforms here
         transform = T.Compose([T.AddRandomWalkPE(walk_length=opt.walk_length,
                                                  attr_name=None)])
         
         # Add the walk features to to the total feature for model construction
         n_features += opt.walk_length
+    else:
+        print("Not using Random Walks...")
+        transform = None
     
     print(f"Total features : {n_features}")
 
@@ -367,6 +383,11 @@ def main(opt):
     model, optimizer, loss = build_model_opt_loss(
         opt, class_weights
     )
+    
+    # Define the learning rate schedulers
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
+                                                           patience=2,
+                                                           mode="min")
 
     # some printing
     print(model)
@@ -410,7 +431,7 @@ def main(opt):
             optimizer=optimizer, loss_fn=loss, **train_args,
             device=opt.device,
             transform=transform,
-            model_name=opt.model
+            scheduler=scheduler,
         )
 
         held_out_results = {}
@@ -420,7 +441,6 @@ def main(opt):
                 data[k], labelled[k],
                 device=opt.device,
                 transform=transform,
-                model_name=opt.model
             )
             
         # Print the metric
@@ -431,6 +451,9 @@ def main(opt):
         print(f"Valid | Bacc : {meta['bacc']} | Auroc : {meta_a['auroc']} | F1-score : {meta_a['f1_score']}")
         print(f"Test  | Bacc : {meta['bacc']} | Auroc : {meta_b['auroc']} | F1-score : {meta_b['f1_score']}")
         print(f"*" * 100)
+        
+        # Step the scheduler
+        scheduler.step(meta['loss'])
 
         # Extract the held out database
         _metric = held_out_results[DATA_LABEL_VAL][best_metric] 
@@ -451,7 +474,7 @@ def main(opt):
                         **held_out_results,
                     }, 
                     "opt": export_args(opt),
-                    "scaler": scaler, # pickle it
+                    "scaler": scaler, 
                     "feature_names": feature_names,
                 },
                 model_save_path
@@ -482,6 +505,15 @@ def embelish_model_args(m: str, parser):
     elif m == "gps":
         import models.gps
         return models.gps.args(parser)
+    elif m == "rggcn":
+        import models.rggcn
+        return models.rggcn.args(parser)
+    elif m == "gs":
+        import models.gs
+        return models.gs.args(parser)
+    elif m == "dgcn":
+        import models.dgcn
+        return models.dgcn.args(parser)
     else:
         raise NotImplementedError
 
@@ -497,6 +529,7 @@ if __name__ == '__main__':
     print ("arguments:")
     print (opt)
 
-    # maybe later add some redundancy here
+    # Seed everything
+    seed_everything(10)
     main(opt)
 

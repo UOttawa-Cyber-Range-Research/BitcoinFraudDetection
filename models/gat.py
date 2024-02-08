@@ -29,7 +29,8 @@ class GAT(torch.nn.Module):
         input_dim, 
         hidden_dim, 
         output_dim, 
-        heads, num_layers,
+        heads,
+        num_layers,
         dropout, 
         emb=False
     ):
@@ -62,16 +63,17 @@ class GAT(torch.nn.Module):
                 hidden_dim, output_dim
             ))
 
+        self.emb = emb
         self.dropout = dropout
         self.num_layers = num_layers
-
-        self.emb = emb
+        self.bns = torch.nn.ModuleList(torch.nn.BatchNorm1d(heads * hidden_dim) for _ in range(self.num_layers))
 
     def forward(self, x, adj_t):          
         for i in range(self.num_layers):
             x = self.convs[i](x, adj_t)
+            x = self.bns[i](x)
             x = F.relu(x)
-            x = F.dropout(x, p=self.dropout,training=self.training)
+            x = F.dropout(x, p=self.dropout, training=self.training)
 
         x = self.post_mp(x)
 
@@ -104,9 +106,10 @@ def build_model(
     if model_only:
         return model
 
-    optimizer = torch.optim.Adam(
-        model.parameters(), 
-        opt.lr,
+    optimizer = torch.optim.AdamW(
+        params=model.parameters(), 
+        lr=opt.lr,
+        weight_decay=5e-3,
     )
     loss_fn = torch.nn.BCEWithLogitsLoss(
         pos_weight=torch.tensor(class_weights),
