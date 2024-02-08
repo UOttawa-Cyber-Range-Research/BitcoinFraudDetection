@@ -2,10 +2,9 @@ import torch
 import argparse
 import numpy as np
 from typing import Any, Dict, Optional
-from torch_geometric.nn import GINConv, GPSConv, global_add_pool
-from torch_geometric.nn.attention import PerformerAttention
+import torch.nn.functional as F
+from torch_geometric.nn import GINConv, GPSConv
 from torch.nn import (
-    BatchNorm1d,
     Linear,
     ModuleList,
     ReLU,
@@ -14,11 +13,16 @@ from torch.nn import (
                 
 class GPS(torch.nn.Module):
     def __init__(self, channels: int, num_layers: int,
-                 attn_type: str, attn_kwargs: Dict[str, Any]):
+                attn_type: str, attn_kwargs: Dict[str, Any]):
         super().__init__()
+        
+        # Define the init transform
+        self.init_transform = torch.nn.Linear(channels, 64)
+        channels = 64
         
         # Define the gps layers
         self.convs = ModuleList()
+        self.dropout = attn_kwargs["dropout"]
         for _ in range(num_layers):
             # Define the sequential model for the GPS layer
             nn = Sequential(
@@ -43,11 +47,18 @@ class GPS(torch.nn.Module):
         )
         
         self.mpl_x = Linear(channels, channels)
+        self.bns = torch.nn.ModuleList(torch.nn.BatchNorm1d(channels) for _ in range(num_layers))
 
     def forward(self, x, edge_index):
+        # Convert the initial transform
+        x = self.init_transform(x)
+        
         # Run the conv and get the output
-        for conv in self.convs:
+        for i, conv in enumerate(self.convs):
             x = conv(x, edge_index)
+            x = self.bns[i](x)
+            x = F.relu(x)
+            x = F.dropout(x, p=self.dropout)
         
         # Return the model
         return self.mlp(x)
@@ -72,9 +83,10 @@ def build_model(
     if model_only:
         return model
 
-    optimizer = torch.optim.Adam(
-        model.parameters(), 
-        opt.lr,
+    optimizer = torch.optim.AdamW(
+        params=model.parameters(), 
+        lr=opt.lr,
+        weight_decay=5e-3,
     )
     loss_fn = torch.nn.BCEWithLogitsLoss(
         pos_weight=torch.tensor(class_weights),
