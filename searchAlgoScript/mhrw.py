@@ -215,6 +215,12 @@ if __name__ == "__main__":
                 samples[['from', 'to']] = samples[['from', 'to']].replace(mapping)
                 sample_labels.node = [i for i in range(len(sample_labels))]
                 sample_features[FEATURE_COLUMNS] = scaler.transform(sample_features[FEATURE_COLUMNS].values)
+                
+                try:
+                    assert samples["from"].max() < 1000, "Error Occured"
+                    assert samples["to"].max() < 1000, "Error Occured"
+                except:
+                    continue
         
                 # Save the data
                 samples.to_parquet(f'{save_path}/cache/edges/edges_{idx}.parquet')

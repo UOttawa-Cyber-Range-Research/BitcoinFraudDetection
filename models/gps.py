@@ -3,7 +3,8 @@ import argparse
 import numpy as np
 from typing import Any, Dict, Optional
 import torch.nn.functional as F
-from torch_geometric.nn import GINConv, GPSConv
+from torch_geometric.nn import GINConv, GPSConv, BatchNorm
+from torch_geometric.nn.norm import GraphNorm
 from torch.nn import (
     Linear,
     ModuleList,
@@ -47,7 +48,7 @@ class GPS(torch.nn.Module):
         )
         
         self.mpl_x = Linear(channels, channels)
-        self.bns = torch.nn.ModuleList(torch.nn.BatchNorm1d(channels) for _ in range(num_layers))
+        self.bns = torch.nn.ModuleList(GraphNorm(channels) for _ in range(num_layers))
 
     def forward(self, x, edge_index):
         # Convert the initial transform
