@@ -1,6 +1,7 @@
 
 import torch.nn
-from torch_geometric.nn import ResGatedGraphConv
+from torch_geometric.nn import ResGatedGraphConv, BatchNorm
+from torch_geometric.nn.norm import GraphNorm
 import torch.nn.functional as F
 import numpy as np
 import argparse
@@ -34,7 +35,7 @@ class ResGatedGCN(torch.nn.Module):
             + [ResGatedGraphConv(hidden_dim, hidden_dim) for _ in range(num_layers - 2)]
             + [ResGatedGraphConv(hidden_dim, output_dim)]
         )
-        self.bns = torch.nn.ModuleList(torch.nn.BatchNorm1d(hidden_dim) for _ in range(num_layers - 1))
+        self.bns = torch.nn.ModuleList(GraphNorm(hidden_dim) for _ in range(num_layers - 1))
         self.dropout = dropout
 
     def reset_parameters(self):

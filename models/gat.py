@@ -3,7 +3,8 @@
 # https://medium.com/stanford-cs224w/applying-graph-ml-to-classify-il-licit-bitcoin-transactions-fd32a1ff5dab
 
 import torch.nn
-from torch_geometric.nn import GATConv
+from torch_geometric.nn import GATConv, BatchNorm
+from torch_geometric.nn.norm import GraphNorm
 import torch.nn.functional as F
 import numpy as np
 import argparse
@@ -66,7 +67,7 @@ class GAT(torch.nn.Module):
         self.emb = emb
         self.dropout = dropout
         self.num_layers = num_layers
-        self.bns = torch.nn.ModuleList(torch.nn.BatchNorm1d(heads * hidden_dim) for _ in range(self.num_layers))
+        self.bns = torch.nn.ModuleList(GraphNorm(heads * hidden_dim) for _ in range(self.num_layers))
 
     def forward(self, x, adj_t):          
         for i in range(self.num_layers):

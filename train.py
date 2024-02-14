@@ -49,7 +49,7 @@ def common_args():
 
     parser.add_argument('model') # first positional argument
     parser.add_argument('-model_path', default='data/models')
-    parser.add_argument('-rwpe', default=False)
+    parser.add_argument('-rwpe', default=True)
     parser.add_argument('-walk_length', default=21)
     parser.add_argument('-model_accum_grads', type=int, default=1)
     parser.add_argument('-data_path', default='data/dataset')
@@ -166,14 +166,6 @@ def train(
         loss.backward()
         optimizer.step()
 
-        # _cnt = cnt + 1
-        # if (
-        #     ((_cnt % accum_gradients) == 0)
-        #     or
-        #     (_cnt == _n)
-        # ):
-        #     optimizer.step()
-
         # Update the loss meter
         loss_meter.update(loss.item(), 1)
         
@@ -228,6 +220,7 @@ def evaluate(
     _mvals = defaultdict(float)
 
     # Evaluate
+    itr = 0
     for k, v in data.items():
         # Collect the model output
         if transform:
@@ -240,7 +233,7 @@ def evaluate(
         _lab = labelled[k]
         
         # Get the metrics
-        with warnings.catch_warnings(record=True) as w:
+        try:
             # Auroc (use the sklearn version)
             _mvals['auroc'] += sklearn.metrics.roc_auc_score(
                 v.y[_lab].cpu(),
@@ -262,9 +255,14 @@ def evaluate(
                     v.y_i[_lab].squeeze(),
                 ).items():
                     _mvals[k2] += v
+                    
+            # Increment the iterator
+            itr += 1
+        except:
+            pass
 
     return {
-        **{k:v / len(data) for k,v in _mvals.items()},
+        **{k:v / itr for k,v in _mvals.items()},
     }, None
 
 
