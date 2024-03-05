@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 from torch_geometric.nn import GENConv, DeepGCNLayer
-from torch_geometric.nn.norm import GraphNorm
+from torch_geometric.nn.norm import GraphNorm, BatchNorm
 import torch.nn.functional as F
 import numpy as np
 import argparse
@@ -44,7 +44,7 @@ class DeeperGCN(torch.nn.Module):
                            t=1.0, learn_t=True, num_layers=2, norm='layer')
             
             # Normalization and activation
-            norm = GraphNorm(input_dim)
+            norm = BatchNorm(input_dim)
             act = nn.ReLU(inplace=True)
             
             # Define the deeper layers

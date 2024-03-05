@@ -4,7 +4,7 @@
 
 import torch.nn
 from torch_geometric.nn import GCNConv, BatchNorm
-from torch_geometric.nn.norm import GraphNorm
+from torch_geometric.nn.norm import GraphNorm, BatchNorm
 import torch.nn.functional as F
 import numpy as np
 import argparse
@@ -38,7 +38,7 @@ class GCN(torch.nn.Module):
             + [GCNConv(hidden_dim, hidden_dim) for _ in range(num_layers - 2)]
             + [GCNConv(hidden_dim, output_dim)]
         )
-        self.bns = torch.nn.ModuleList(GraphNorm(hidden_dim) for _ in range(num_layers - 1))
+        self.bns = torch.nn.ModuleList(BatchNorm(hidden_dim) for _ in range(num_layers - 1))
         self.dropout = dropout
 
     def reset_parameters(self):
