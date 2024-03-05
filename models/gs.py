@@ -35,7 +35,7 @@ class GraphSage(torch.nn.Module):
             + [SAGEConv(hidden_dim, hidden_dim) for _ in range(num_layers - 2)]
             + [SAGEConv(hidden_dim, output_dim)]
         )
-        self.bns = torch.nn.ModuleList(GraphNorm(hidden_dim) for _ in range(num_layers - 1))
+        self.bns = torch.nn.ModuleList(BatchNorm(hidden_dim) for _ in range(num_layers - 1))
         self.dropout = dropout
 
     def reset_parameters(self):

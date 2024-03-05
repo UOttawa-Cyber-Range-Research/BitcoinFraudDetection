@@ -4,7 +4,7 @@
 
 import torch.nn
 from torch_geometric.nn import GATConv, BatchNorm
-from torch_geometric.nn.norm import GraphNorm
+from torch_geometric.nn.norm import GraphNorm, BatchNorm
 import torch.nn.functional as F
 import numpy as np
 import argparse
@@ -67,7 +67,7 @@ class GAT(torch.nn.Module):
         self.emb = emb
         self.dropout = dropout
         self.num_layers = num_layers
-        self.bns = torch.nn.ModuleList(GraphNorm(heads * hidden_dim) for _ in range(self.num_layers))
+        self.bns = torch.nn.ModuleList(BatchNorm(heads * hidden_dim) for _ in range(self.num_layers))
 
     def forward(self, x, adj_t):          
         for i in range(self.num_layers):

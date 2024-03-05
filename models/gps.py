@@ -48,7 +48,7 @@ class GPS(torch.nn.Module):
         )
         
         self.mpl_x = Linear(channels, channels)
-        self.bns = torch.nn.ModuleList(GraphNorm(channels) for _ in range(num_layers))
+        self.bns = torch.nn.ModuleList(BatchNorm(channels) for _ in range(num_layers))
 
     def forward(self, x, edge_index):
         # Convert the initial transform
