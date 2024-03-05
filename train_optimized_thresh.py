@@ -12,53 +12,13 @@ import numpy as np
 from tqdm import tqdm
 from typing import List, Optional
 from metrics.IIG import *
+from metrics.GDR import *
+from sklearn.metrics import roc_auc_score, precision_recall_curve, f1_score
 import torch_geometric.transforms as T
 
 # ----------------------------------------------------------
 # ARGS
 # ----------------------------------------------------------
-
-def cluster_dist_metric(model_out, num_classes=2, gt_label=None):
-    '''
-    Implements the inter and intra clsuter distance for a sequence of graph
-    '''
-    
-    # Placeholder
-    X_labels = []
-    
-    # One hot model out
-    prob_1 = model_out
-    prob_0 = 1 - prob_1
-    model_out = torch.cat((prob_0, prob_1), dim=-1)
-    
-    # Loop and set the labels
-    for i in range(num_classes):
-        X_label = model_out[gt_label == i].data.cpu().numpy()
-        h_norm = np.sum(np.square(X_label), axis=1, keepdims=True)
-        h_norm[h_norm == 0.] = 1e-3
-        X_label = X_label / np.sqrt(h_norm)
-        X_labels.append(X_label)
-
-    # Intra cluster distance
-    dis_intra = 0.0
-    for i in range(num_classes):
-        x2 = np.sum(np.square(X_labels[i]), axis=1, keepdims=True)
-        dists = x2 + x2.T - 2 * np.matmul(X_labels[i], X_labels[i].T)
-        dis_intra += np.mean(dists)
-    dis_intra /= num_classes
-    
-    # Inter cluster distance
-    dis_inter = 0.0
-    for i in range(num_classes-1):
-        for j in range(i+1, num_classes):
-            x2_i = np.sum(np.square(X_labels[i]), axis=1, keepdims=True)
-            x2_j = np.sum(np.square(X_labels[j]), axis=1, keepdims=True)
-            dists = x2_i + x2_j.T - 2 * np.matmul(X_labels[i], X_labels[j].T)
-            dis_inter += np.mean(dists)
-    num_inter = float(num_classes * (num_classes-1) / 2)
-    dis_inter /= num_inter
-
-    return dis_intra, dis_inter
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -105,7 +65,7 @@ def common_args():
     parser.add_argument('-resample_factor_semi_sup', type=int, default=None)
     parser.add_argument('-additional_features', nargs='*')
     parser.add_argument('-train', action='store_false', default=True)
-    parser.add_argument('-train_best_metric', default='bacc')
+    parser.add_argument('-train_best_metric', default='auc_score')
     parser.add_argument('-epochs', type=int, default=12)
     parser.add_argument('-tensorboard', action='store_true', default=False)
     parser.add_argument('-debug', action='store_true', default=False)
@@ -145,11 +105,11 @@ def metrics(name: str, **kwargs):
         conf = torchmetrics.ConfusionMatrix(
             num_classes=2,
             normalize='true', 
-            threshold=.5,
+            threshold=kwargs.get("thresh", 0.5),
         ).to(kwargs.get("device", torch.device("cpu")))
 
         def _acc(p, t):
-            M = conf(p, t)
+            M = conf(torch.tensor(p), torch.tensor(t).long())
             tpr = (M[1,1] / M[1].sum()).item()
             tnr = (M[0,0] / M[0].sum()).item()
             return {
@@ -162,9 +122,6 @@ def metrics(name: str, **kwargs):
     else:
         raise NotImplementedError
 
-
-from collections import defaultdict
-
 def train(
     model, data: Dict, labelled, 
     optimizer, loss_fn,
@@ -173,21 +130,17 @@ def train(
     transform=None,
     scheduler=None,
 ):
+    # Put the model in train mode
     model.train()
 
-    _metrics = {
-        "accuracies": metrics("accuracies", device=device),
-    }
-    _mvals = defaultdict(float)
-
-    # for gradient 
-    _n = len(data)
-
     # Maintain a meter for the loss value
-    itr = 0
     skipped = 0
     loss_meter = AverageMeter()
-    for _, (k, v) in tqdm(enumerate(data.items()), total=len(data), disable=True):
+    
+    # Evaluate
+    list_preds = []
+    list_labels = []
+    for _, (k, v) in tqdm(enumerate(data.items()), total=len(data), disable=False):
         if v.edge_index.max() < v.num_nodes:
             # Transform the dataset
             if transform:
@@ -213,60 +166,22 @@ def train(
             # Update the loss meter
             loss_meter.update(loss.item(), 1)
             
-            try:
-                # Mutual Information and add it to the metric list
-                distance_intra, distance_inter = cluster_dist_metric(torch.sigmoid(out[_lab]),
-                                                                     num_classes=2,
-                                                                     gt_label=v.y[_lab])
-                dis_ratio = distance_inter / distance_intra
-                dis_ratio = 1. if np.isnan(dis_ratio) else dis_ratio
-                dis_ratio = 1. if float(dis_ratio) == float("inf") else dis_ratio
-                dis_ratio = 1. if float(dis_ratio) == float("-inf") else dis_ratio
-                _mvals['GDR'] += dis_ratio
-                
-                # Load the stuff for IIG
-                temp_data = v.x.data.cpu().numpy()
-                layer_self = out[_lab].data.cpu().numpy()
-                MI_XiX = mi_kde(layer_self, temp_data, var=0.1)
-                _mvals['IIG'] += MI_XiX
-                
-                # Used by all metrics
-                common = torch.sigmoid(out[_lab]).detach().cpu()
-                
-                # Auroc
-                _mvals['auroc'] += sklearn.metrics.roc_auc_score(
-                    v.y[_lab].cpu(),
-                    common,
-                )
-                
-                # F1-score
-                f1_help = (common > 0.5).long()
-                _mvals['f1_score'] += sklearn.metrics.f1_score(
-                    v.y[_lab].cpu().long().squeeze(),
-                    f1_help.view(-1).squeeze(),
-                )
+            # Define the placeholder
+            list_preds.append(torch.sigmoid(out[_lab]).view(-1).detach().cpu().numpy())
+            list_labels.append(v.y[_lab].view(-1).detach().cpu().numpy())
 
-                # Fetch torchmetrics metrics
-                for k, m in _metrics.items():
-                    for k2, v in m(
-                        torch.sigmoid(out[_lab]).squeeze(),
-                        v.y_i[_lab].squeeze(),
-                    ).items():
-                        _mvals[k2] += v
-                        
-                # Increment the iterator
-                itr += 1
-            except:
-                pass
-        else:
-            skipped += 1
+    # Concat the preds
+    list_preds = np.concatenate(list_preds)
+    list_labels = np.concatenate(list_labels)
     
+    # Compute the auc score
+    auc_score = roc_auc_score(list_labels, list_preds)
     print(f"Total skipped graphs : {skipped}")
     
     return {
-        'loss': round(loss_meter.avg, ndigits=4),
-        **{k: round(v / itr, ndigits=4) for k,v in _mvals.items()},
-    }
+        'loss': round(loss_meter.avg, ndigits=5),
+        'auc_score': round(auc_score, ndigits=5),
+    }, list_labels, list_preds
 
 @torch.no_grad()
 def evaluate(
@@ -277,14 +192,10 @@ def evaluate(
     # Put in eval mode
     model.eval()
 
-    # Define the metics to calculate
-    _metrics = {
-        "accuracies": metrics("accuracies", device=device),
-    }
-    _mvals = defaultdict(float)
-
     # Evaluate
-    itr = 0
+    list_preds = []
+    list_labels = []
+    list_x = []
     for k, v in data.items():
         # Collect the model output
         if transform:
@@ -296,56 +207,20 @@ def evaluate(
         # Get the labelled indexes
         _lab = labelled[k]
         
-        # Get the metrics
-        try:
-            # Mutual Information and add it to the metric list
-            distance_intra, distance_inter = cluster_dist_metric(torch.sigmoid(out[_lab]),
-                                                                 num_classes=2,
-                                                                 gt_label=v.y[_lab])
-            dis_ratio = distance_inter / distance_intra
-            dis_ratio = 1. if np.isnan(dis_ratio) else dis_ratio
-            dis_ratio = 1. if float(dis_ratio) == float("inf") else dis_ratio
-            dis_ratio = 1. if float(dis_ratio) == float("-inf") else dis_ratio
-            _mvals['GDR'] += dis_ratio
-            
-            # Load the stuff for IIG
-            temp_data = v.x.data.cpu().numpy()
-            layer_self = out[_lab].data.cpu().numpy()
-            MI_XiX = mi_kde(layer_self, temp_data, var=0.1)
-            _mvals['IIG'] += MI_XiX
-            
-            # Used by all metrics
-            common = torch.sigmoid(out[_lab]).detach().cpu()
-            
-            # Auroc
-            _mvals['auroc'] += sklearn.metrics.roc_auc_score(
-                v.y[_lab].cpu(),
-                common,
-            )
-            
-            # F1-score
-            f1_help = (common > 0.5).long()
-            _mvals['f1_score'] += sklearn.metrics.f1_score(
-                v.y[_lab].cpu().long().squeeze(),
-                f1_help.view(-1).squeeze(),
-            )
+        # Define the placeholder
+        list_preds.append(torch.sigmoid(out[_lab]).view(-1).detach().cpu().numpy())
+        list_labels.append(v.y[_lab].view(-1).detach().cpu().numpy())
+        list_x.append(v.x.detach().cpu().numpy())
 
-            # see comments in train
-            for k, m in _metrics.items():
-                for k2, v in m(
-                    torch.sigmoid(out[_lab]).squeeze(),
-                    v.y_i[_lab].squeeze(),
-                ).items():
-                    _mvals[k2] += v
-                    
-            # Increment the iterator
-            itr += 1
-        except Exception as e:
-            pass
-
+    # Concat the preds
+    list_preds = np.concatenate(list_preds)
+    list_labels = np.concatenate(list_labels)
+    list_x = np.concatenate(list_x)
+    
+    # Return the data
     return {
-        **{k: round(v / itr, ndigits=4) for k,v in _mvals.items()},
-    }, None
+        "auc_score": round(roc_auc_score(list_labels, list_preds), ndigits=5) 
+    }, list_labels, list_preds, list_x
 
 
 from datasets.types import DATA_LABEL_TRAIN, DATA_LABEL_VAL, DATA_LABEL_TEST
@@ -492,7 +367,7 @@ def main(opt):
     (train, evaluate, train_args) = build_functions(opt)
 
     if opt.tensorboard:
-        print ("activate tensorboard")
+        print("activate tensorboard")
         from utils import TensorboardWriter
         _external_writer = TensorboardWriter(
             os.path.join(opt.model_path, f"{opt.model}_logs")
@@ -517,7 +392,7 @@ def main(opt):
     # Start the model training
     print(f"Transform before : {transform}")
     for epoch in range(1, 1 + opt.epochs):
-        meta = train(
+        train_metric, train_labels, train_preds = train(
             model=model, data=data[DATA_LABEL_TRAIN], 
             labelled=labelled[DATA_LABEL_TRAIN], 
             optimizer=optimizer, loss_fn=loss, **train_args,
@@ -526,44 +401,47 @@ def main(opt):
             scheduler=scheduler,
         )
 
-        held_out_results = {}
-        for k in [DATA_LABEL_VAL, DATA_LABEL_TEST]:
-            held_out_results[k], _ = evaluate(
-                model, 
-                data[k], labelled[k],
-                device=opt.device,
-                transform=transform,
-            )
+        # Collect the validation result
+        val_metric, _, _, _ = evaluate(
+            model,
+            data[DATA_LABEL_VAL], labelled[DATA_LABEL_VAL],
+            device=opt.device,
+            transform=transform,
+        )
+        
+        # Collect the test result
+        test_metric, _, _, _ = evaluate(
+            model,
+            data[DATA_LABEL_TEST], labelled[DATA_LABEL_TEST],
+            device=opt.device,
+            transform=transform,
+        )
             
         # Print the metric
-        meta_a = held_out_results[DATA_LABEL_VAL]
-        meta_b = held_out_results[DATA_LABEL_TEST]
         print("*" * 50 + f"Epoch : {epoch}" + "*" * 50)
-        print(f"Train | Loss : {meta['loss']} | Bacc : {meta['bacc']} | Auroc : {meta['auroc']} | F1-score : {meta['f1_score']} | GDR : {meta['GDR']} | IIG : {meta['IIG']}")
-        print(f"Valid | Bacc : {meta_a['bacc']} | Auroc : {meta_a['auroc']} | F1-score : {meta_a['f1_score']} | GDR : {meta_a['GDR']} | IIG : {meta_a['IIG']}")
-        print(f"Test  | Bacc : {meta_b['bacc']} | Auroc : {meta_b['auroc']} | F1-score : {meta_b['f1_score']} | GDR : {meta_b['GDR']} | IIG : {meta_b['IIG']}")
+        print(f"Train | Loss : {train_metric['loss']} | AUC : {train_metric['auc_score']}")
+        print(f"Valid | AUC : {val_metric['auc_score']}")
+        print(f"Test  | AUC : {test_metric['auc_score']}")
         print(f"*" * 100)
         
         # Step the scheduler
-        scheduler.step(meta['loss'])
+        scheduler.step(train_metric['loss'])
 
         # Extract the held out database
-        _metric = held_out_results[DATA_LABEL_VAL][best_metric] 
+        _metric = val_metric[best_metric] 
         
         # Check if the metric has improved over the last best
         if _metric > best:
             best = _metric
-            best_test = held_out_results[DATA_LABEL_TEST][best_metric] 
             best_epoch = epoch
 
-            print ("Saving model", best, _metric, best_epoch)
+            print ("Saving model......", best, _metric, best_epoch)
             torch.save(
                 {
                     "state_dict": model.state_dict(),
                     "metrics": {
                         'epoch': epoch,
                         'best_metric': best_metric,
-                        **held_out_results,
                     }, 
                     "opt": export_args(opt),
                     "scaler": scaler, 
@@ -571,19 +449,107 @@ def main(opt):
                 },
                 model_save_path
             )
-        
-        if _external_writer:
-            _external_writer.write(
-                "loss/train", meta['loss'], epoch
-            )
-
-            for k,v in held_out_results.items():
-                for k2 in v:
-                    _external_writer.write(
-                        f"{k2}/{k}", 
-                        v[k2], 
-                        epoch
-                    )
+            
+    # Load the best model again
+    model.load_state_dict(torch.load(model_save_path)["state_dict"])
+    print("Model weights loaded successfully.......")
+    
+    # Predict using the model
+    _, train_labels, train_preds, train_x = evaluate(
+        model,
+        data[DATA_LABEL_TRAIN], labelled[DATA_LABEL_TRAIN],
+        device=opt.device,
+        transform=transform,
+    )
+    
+    _, val_labels, val_preds, val_x = evaluate(
+        model,
+        data[DATA_LABEL_VAL], labelled[DATA_LABEL_VAL],
+        device=opt.device,
+        transform=transform,
+    )
+    
+    _, test_labels, test_preds, test_x = evaluate(
+        model,
+        data[DATA_LABEL_TEST], labelled[DATA_LABEL_TEST],
+        device=opt.device,
+        transform=transform,
+    )
+    
+    # Calculate the optimal threshold (validation set)
+    precision, recall, thresholds = precision_recall_curve(train_labels, train_preds)
+    fscore_old = (2 * precision * recall) / (precision + recall)
+    fscore_old = fscore_old[:-1]
+    fscore = fscore_old[fscore_old > 0]
+    thresholds = thresholds[fscore_old > 0]
+    ix = np.argmax(fscore)
+    
+    # Print the scores
+    print(f'Best Threshold : {thresholds[ix]} | Best F-score : {fscore[ix]}')
+    
+    # Define the metrics
+    accuracy_metric = metrics("accuracies", thresh=thresholds[ix])
+    
+    # Print the scores
+    train_preds_thresh = (train_preds > thresholds[ix]) * 1
+    val_preds_thresh = (val_preds > thresholds[ix]) * 1
+    test_preds_thresh = (test_preds > thresholds[ix]) * 1
+    
+    # Print the metrics for val
+    f1_train = round(f1_score(train_labels, train_preds_thresh), ndigits=5)
+    roc_auc_score_train = round(roc_auc_score(train_labels, train_preds), ndigits=5)
+    accuracy_train = round(accuracy_metric(train_preds, train_labels)["bacc"], ndigits=5)
+    print("Stage 1 Complete")
+    distance_intra, distance_inter = cluster_dist_metric(train_preds,
+                                                         num_classes=2,
+                                                         gt_label=train_labels)
+    dis_ratio = distance_inter / distance_intra
+    dis_ratio = 1. if np.isnan(dis_ratio) else dis_ratio
+    dis_ratio = 1. if float(dis_ratio) == float("inf") else dis_ratio
+    dis_ratio = 1. if float(dis_ratio) == float("-inf") else dis_ratio
+    grd_train = dis_ratio
+    print("Stage 2 Complete")
+    
+    # IIG
+    IIG_train = mi_kde(train_preds.reshape(-1, 1), train_x, var=0.1)
+    print("Stage 3 Complete")
+    
+    # Print the metrics for val
+    f1_val = round(f1_score(val_labels, val_preds_thresh), ndigits=5)
+    roc_auc_score_val = round(roc_auc_score(val_labels, val_preds), ndigits=5)
+    accuracy_val = round(accuracy_metric(val_preds, val_labels)["bacc"], ndigits=5)
+    distance_intra, distance_inter = cluster_dist_metric(val_preds,
+                                                         num_classes=2,
+                                                         gt_label=val_labels)
+    dis_ratio = distance_inter / distance_intra
+    dis_ratio = 1. if np.isnan(dis_ratio) else dis_ratio
+    dis_ratio = 1. if float(dis_ratio) == float("inf") else dis_ratio
+    dis_ratio = 1. if float(dis_ratio) == float("-inf") else dis_ratio
+    grd_val = dis_ratio
+    
+    # IIG
+    IIG_val = mi_kde(val_preds.reshape(-1, 1), val_x, var=0.1)
+    
+    # Print the metrics for test
+    f1_test = round(f1_score(test_labels, test_preds_thresh), ndigits=5)
+    roc_auc_score_test = round(roc_auc_score(test_labels, test_preds), ndigits=5)
+    accuracy_test = round(accuracy_metric(test_preds, test_labels)["bacc"], ndigits=5)
+    distance_intra, distance_inter = cluster_dist_metric(test_preds,
+                                                         num_classes=2,
+                                                         gt_label=test_labels)
+    dis_ratio = distance_inter / distance_intra
+    dis_ratio = 1. if np.isnan(dis_ratio) else dis_ratio
+    dis_ratio = 1. if float(dis_ratio) == float("inf") else dis_ratio
+    dis_ratio = 1. if float(dis_ratio) == float("-inf") else dis_ratio
+    grd_test = dis_ratio
+    
+    # IIG
+    IIG_test = mi_kde(test_preds.reshape(-1, 1), test_x, var=0.1)
+    
+    # Print the results
+    print(f"TRAIN ==> F1 : {f1_train} | ROC : {roc_auc_score_train} | BACC : {accuracy_train} | GDR : {grd_train} | IIG : {IIG_train}")
+    print(f"VALID ==> F1 : {f1_val} | ROC : {roc_auc_score_val} | BACC : {accuracy_val} | GDR : {grd_val} | IIG : {IIG_val}")
+    print(f"TEST  ==> F1 : {f1_test} | ROC : {roc_auc_score_test} | BACC : {accuracy_test} | GDR : {grd_test} | IIG : {IIG_test}")
 
 
 # build the parser depending on the model
