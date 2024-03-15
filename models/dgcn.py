@@ -28,6 +28,7 @@ class DeeperGCN(torch.nn.Module):
             output_dim, 
             num_layers, 
             dropout,
+            norm,
         ):
 
         super().__init__()
@@ -43,8 +44,13 @@ class DeeperGCN(torch.nn.Module):
             conv = GENConv(in_channels=input_dim, out_channels=input_dim, aggr='softmax',
                            t=1.0, learn_t=True, num_layers=2, norm='layer')
             
-            # Normalization and activation
-            norm = BatchNorm(input_dim)
+            # Normalization
+            if norm == "GN":
+                norm = GraphNorm(input_dim)
+            else:
+                norm = BatchNorm(input_dim)
+                
+            # Define the activation
             act = nn.ReLU(inplace=True)
             
             # Define the deeper layers
@@ -81,6 +87,7 @@ def build_model(
             output_dim=1,
             num_layers=opt.num_layers,
             dropout=opt.dropout,
+            norm=opt.norm,
         ).to(opt.device)
     else:
         raise NotImplementedError

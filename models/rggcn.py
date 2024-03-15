@@ -1,4 +1,3 @@
-
 import torch.nn
 from torch_geometric.nn import ResGatedGraphConv, BatchNorm
 from torch_geometric.nn.norm import GraphNorm
@@ -14,6 +13,7 @@ def args(parser: argparse.ArgumentParser = argparse.ArgumentParser()):
         parser.add_argument('-dropout', type=float, default=0.2)
         parser.add_argument('-lr', type=float, default=1e-3)
         parser.add_argument('-class_weight', type=int, default=10)
+        parser.add_argument('-norm')
     except argparse.ArgumentError:
         pass
 
@@ -27,6 +27,7 @@ class ResGatedGCN(torch.nn.Module):
             output_dim, 
             num_layers, 
             dropout,
+            norm,
         ):
 
         super().__init__()
@@ -35,7 +36,11 @@ class ResGatedGCN(torch.nn.Module):
             + [ResGatedGraphConv(hidden_dim, hidden_dim) for _ in range(num_layers - 2)]
             + [ResGatedGraphConv(hidden_dim, output_dim)]
         )
-        self.bns = torch.nn.ModuleList(BatchNorm(hidden_dim) for _ in range(num_layers - 1))
+        
+        if norm == "GN":
+            self.bns = torch.nn.ModuleList(GraphNorm(hidden_dim) for _ in range(num_layers - 1))
+        else:
+            self.bns = torch.nn.ModuleList(BatchNorm(hidden_dim) for _ in range(num_layers - 1))
         self.dropout = dropout
 
     def reset_parameters(self):
@@ -69,6 +74,7 @@ def build_model(
             output_dim=1,
             num_layers=opt.num_layers,
             dropout=opt.dropout,
+            norm=opt.norm,
         ).to(opt.device)
     else:
         raise NotImplementedError

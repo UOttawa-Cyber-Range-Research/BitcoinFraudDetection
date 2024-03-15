@@ -1,4 +1,5 @@
 import os
+import wandb
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 import warnings
@@ -12,86 +13,20 @@ import numpy as np
 from tqdm import tqdm
 from typing import List, Optional
 from metrics.IIG import *
+from metrics.GDR import *
+from utils import *
 import torch_geometric.transforms as T
 
 # ----------------------------------------------------------
 # ARGS
 # ----------------------------------------------------------
-
-def cluster_dist_metric(model_out, num_classes=2, gt_label=None):
-    '''
-    Implements the inter and intra clsuter distance for a sequence of graph
-    '''
-    
-    # Placeholder
-    X_labels = []
-    
-    # One hot model out
-    prob_1 = model_out
-    prob_0 = 1 - prob_1
-    model_out = torch.cat((prob_0, prob_1), dim=-1)
-    
-    # Loop and set the labels
-    for i in range(num_classes):
-        X_label = model_out[gt_label == i].data.cpu().numpy()
-        h_norm = np.sum(np.square(X_label), axis=1, keepdims=True)
-        h_norm[h_norm == 0.] = 1e-3
-        X_label = X_label / np.sqrt(h_norm)
-        X_labels.append(X_label)
-
-    # Intra cluster distance
-    dis_intra = 0.0
-    for i in range(num_classes):
-        x2 = np.sum(np.square(X_labels[i]), axis=1, keepdims=True)
-        dists = x2 + x2.T - 2 * np.matmul(X_labels[i], X_labels[i].T)
-        dis_intra += np.mean(dists)
-    dis_intra /= num_classes
-    
-    # Inter cluster distance
-    dis_inter = 0.0
-    for i in range(num_classes-1):
-        for j in range(i+1, num_classes):
-            x2_i = np.sum(np.square(X_labels[i]), axis=1, keepdims=True)
-            x2_j = np.sum(np.square(X_labels[j]), axis=1, keepdims=True)
-            dists = x2_i + x2_j.T - 2 * np.matmul(X_labels[i], X_labels[j].T)
-            dis_inter += np.mean(dists)
-    num_inter = float(num_classes * (num_classes-1) / 2)
-    dis_inter /= num_inter
-
-    return dis_intra, dis_inter
-
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-        
-def seed_everything(seed):
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-
 def common_args():
     import argparse
     parser = argparse.ArgumentParser("Train graphical models for bitcoin data")
 
     parser.add_argument('model') # first positional argument
     parser.add_argument('-model_path', default='data/models')
-    parser.add_argument('-rwpe', default=False)
+    parser.add_argument('-rwpe', default="false")
     parser.add_argument('-walk_length', default=21)
     parser.add_argument('-model_accum_grads', type=int, default=1)
     parser.add_argument('-data_path', default='data/dataset')
@@ -110,6 +45,7 @@ def common_args():
     parser.add_argument('-tensorboard', action='store_true', default=False)
     parser.add_argument('-debug', action='store_true', default=False)
     parser.add_argument('-refresh_cache', action='store_true', default=False)
+    parser.add_argument('-norm', default="GN")
     return parser
 
 def parse_args(
@@ -270,7 +206,7 @@ def train(
 
 @torch.no_grad()
 def evaluate(
-    model, data, labelled, 
+    model, loss_fn, data, labelled, 
     device=torch.device("cpu"),
     transform=None,
 ):
@@ -282,68 +218,85 @@ def evaluate(
         "accuracies": metrics("accuracies", device=device),
     }
     _mvals = defaultdict(float)
-
+    
+    # Define the loss meter
+    loss_meter = AverageMeter()
+    
     # Evaluate
     itr = 0
     for k, v in data.items():
-        # Collect the model output
-        if transform:
-            v = transform(v)
-        
-        # Get the model output
-        out = model(v.x, v.edge_index)
-        
-        # Get the labelled indexes
-        _lab = labelled[k]
-        
-        # Get the metrics
-        try:
-            # Mutual Information and add it to the metric list
-            distance_intra, distance_inter = cluster_dist_metric(torch.sigmoid(out[_lab]),
-                                                                 num_classes=2,
-                                                                 gt_label=v.y[_lab])
-            dis_ratio = distance_inter / distance_intra
-            dis_ratio = 1. if np.isnan(dis_ratio) else dis_ratio
-            dis_ratio = 1. if float(dis_ratio) == float("inf") else dis_ratio
-            dis_ratio = 1. if float(dis_ratio) == float("-inf") else dis_ratio
-            _mvals['GDR'] += dis_ratio
+        # Check if graphs are good
+        if v.edge_index.max() < v.num_nodes:
             
-            # Load the stuff for IIG
-            temp_data = v.x.data.cpu().numpy()
-            layer_self = out[_lab].data.cpu().numpy()
-            MI_XiX = mi_kde(layer_self, temp_data, var=0.1)
-            _mvals['IIG'] += MI_XiX
+            # Collect the model output
+            if transform:
+                v = transform(v)
             
-            # Used by all metrics
-            common = torch.sigmoid(out[_lab]).detach().cpu()
+            # Get the model output
+            out = model(v.x, v.edge_index)
             
-            # Auroc
-            _mvals['auroc'] += sklearn.metrics.roc_auc_score(
-                v.y[_lab].cpu(),
-                common,
+            # Get the labelled indexes
+            _lab = labelled[k]
+            
+            # Find the loss value
+            _lab = labelled[k]
+            loss = loss_fn(
+                out[_lab], 
+                v.y[_lab].unsqueeze(dim=-1)
             )
             
-            # F1-score
-            f1_help = (common > 0.5).long()
-            _mvals['f1_score'] += sklearn.metrics.f1_score(
-                v.y[_lab].cpu().long().squeeze(),
-                f1_help.view(-1).squeeze(),
-            )
+            # Update the loss meter
+            loss_meter.update(loss.item(), 1)
+            
+            # Get the metrics
+            try:
+                # Mutual Information and add it to the metric list
+                distance_intra, distance_inter = cluster_dist_metric(torch.sigmoid(out[_lab]),
+                                                                    num_classes=2,
+                                                                    gt_label=v.y[_lab])
+                dis_ratio = distance_inter / distance_intra
+                dis_ratio = 1. if np.isnan(dis_ratio) else dis_ratio
+                dis_ratio = 1. if float(dis_ratio) == float("inf") else dis_ratio
+                dis_ratio = 1. if float(dis_ratio) == float("-inf") else dis_ratio
+                _mvals['GDR'] += dis_ratio
+                
+                # Load the stuff for IIG
+                temp_data = v.x.data.cpu().numpy()
+                layer_self = out[_lab].data.cpu().numpy()
+                MI_XiX = mi_kde(layer_self, temp_data, var=0.1)
+                _mvals['IIG'] += MI_XiX
+                
+                # Used by all metrics
+                common = torch.sigmoid(out[_lab]).detach().cpu()
+                
+                # Auroc
+                _mvals['auroc'] += sklearn.metrics.roc_auc_score(
+                    v.y[_lab].cpu(),
+                    common,
+                )
+                
+                # F1-score
+                f1_help = (common > 0.5).long()
+                _mvals['f1_score'] += sklearn.metrics.f1_score(
+                    v.y[_lab].cpu().long().squeeze(),
+                    f1_help.view(-1).squeeze(),
+                )
 
-            # see comments in train
-            for k, m in _metrics.items():
-                for k2, v in m(
-                    torch.sigmoid(out[_lab]).squeeze(),
-                    v.y_i[_lab].squeeze(),
-                ).items():
-                    _mvals[k2] += v
-                    
-            # Increment the iterator
-            itr += 1
-        except Exception as e:
-            pass
+                # see comments in train
+                for k, m in _metrics.items():
+                    for k2, v in m(
+                        torch.sigmoid(out[_lab]).squeeze(),
+                        v.y_i[_lab].squeeze(),
+                    ).items():
+                        _mvals[k2] += v
+                        
+                # Increment the iterator
+                itr += 1
+            except Exception as e:
+                pass
 
     return {
+        'loss': round(loss_meter.avg, ndigits=4),
         **{k: round(v / itr, ndigits=4) for k,v in _mvals.items()},
     }, None
 
@@ -446,18 +399,16 @@ def build_functions(opt):
 # ----------------------------------------------------------
 # MAIN
 # ----------------------------------------------------------
-from utils import export_args
-
-def main(opt):    
+def main(opt):
     # Fetch the dataset
     data, labelled, scaler, feature_names, n_features, class_weights = load_data(opt)
     
     # Check if the random walk is there or not
-    if opt.rwpe:
+    if opt.rwpe == "true":
         print("Using Random Walks...")
         # Define the transforms here
         transform = T.Compose([T.AddRandomWalkPE(walk_length=opt.walk_length,
-                                                 attr_name=None)])
+                                                attr_name=None)])
         
         # Add the walk features to to the total feature for model construction
         n_features += opt.walk_length
@@ -472,7 +423,7 @@ def main(opt):
     print("n_features", opt.input_dim)
     
     # build the model, optimizer, loss
-    model, optimizer, loss = build_model_opt_loss(
+    model, optimizer, loss_fxn = build_model_opt_loss(
         opt, class_weights
     )
     
@@ -505,7 +456,7 @@ def main(opt):
         opt.model_path, exist_ok=True
     )
     model_save_path = os.path.join(
-        opt.model_path, f'{opt.model}.pt'
+        opt.model_path, f'{opt.model}_{opt.data_path.split("/")[-1]}_{opt.norm}_{opt.rwpe}_normal.pt'
     )
     print (f"Saving model in \'{model_save_path}\'")
     
@@ -517,10 +468,11 @@ def main(opt):
     # Start the model training
     print(f"Transform before : {transform}")
     for epoch in range(1, 1 + opt.epochs):
+        print("*" * 50 + f"Epoch : {epoch}" + "*" * 50)
         meta = train(
             model=model, data=data[DATA_LABEL_TRAIN], 
             labelled=labelled[DATA_LABEL_TRAIN], 
-            optimizer=optimizer, loss_fn=loss, **train_args,
+            optimizer=optimizer, loss_fn=loss_fxn, **train_args,
             device=opt.device,
             transform=transform,
             scheduler=scheduler,
@@ -530,6 +482,7 @@ def main(opt):
         for k in [DATA_LABEL_VAL, DATA_LABEL_TEST]:
             held_out_results[k], _ = evaluate(
                 model, 
+                loss_fxn,
                 data[k], labelled[k],
                 device=opt.device,
                 transform=transform,
@@ -538,14 +491,14 @@ def main(opt):
         # Print the metric
         meta_a = held_out_results[DATA_LABEL_VAL]
         meta_b = held_out_results[DATA_LABEL_TEST]
-        print("*" * 50 + f"Epoch : {epoch}" + "*" * 50)
         print(f"Train | Loss : {meta['loss']} | Bacc : {meta['bacc']} | Auroc : {meta['auroc']} | F1-score : {meta['f1_score']} | GDR : {meta['GDR']} | IIG : {meta['IIG']}")
-        print(f"Valid | Bacc : {meta_a['bacc']} | Auroc : {meta_a['auroc']} | F1-score : {meta_a['f1_score']} | GDR : {meta_a['GDR']} | IIG : {meta_a['IIG']}")
-        print(f"Test  | Bacc : {meta_b['bacc']} | Auroc : {meta_b['auroc']} | F1-score : {meta_b['f1_score']} | GDR : {meta_b['GDR']} | IIG : {meta_b['IIG']}")
+        print(f"Valid | Loss : {meta_a['loss']} | Bacc : {meta_a['bacc']} | Auroc : {meta_a['auroc']} | F1-score : {meta_a['f1_score']} | GDR : {meta_a['GDR']} | IIG : {meta_a['IIG']}")
+        print(f"Test  | Loss : {meta_b['loss']} | Bacc : {meta_b['bacc']} | Auroc : {meta_b['auroc']} | F1-score : {meta_b['f1_score']} | GDR : {meta_b['GDR']} | IIG : {meta_b['IIG']}")
+        print(f"Learning Rate : {optimizer.param_groups[0]['lr']}")
         print(f"*" * 100)
         
         # Step the scheduler
-        scheduler.step(meta['loss'])
+        scheduler.step(meta_a['loss'])
 
         # Extract the held out database
         _metric = held_out_results[DATA_LABEL_VAL][best_metric] 
@@ -616,7 +569,7 @@ def embelish_model_args(m: str, parser):
         raise NotImplementedError
 
 if __name__ == '__main__':
-
+    print("Model training started...........")
     parser = common_args()
     parser = embelish_model_args(
         sys.argv[1], parser
@@ -624,8 +577,8 @@ if __name__ == '__main__':
 
     opt = parse_args(parser)
 
-    print ("arguments:")
-    print (opt)
+    print("arguments:")
+    print(opt)
 
     # Seed everything
     seed_everything(10)

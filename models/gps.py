@@ -14,11 +14,13 @@ from torch.nn import (
                 
 class GPS(torch.nn.Module):
     def __init__(self, channels: int, num_layers: int,
-                attn_type: str, attn_kwargs: Dict[str, Any]):
+                attn_type: str, norm:str, attn_kwargs: Dict[str, Any]):
         super().__init__()
         
         # Define the init transform
         self.init_transform = torch.nn.Linear(channels, 64)
+        
+        # Redefine the channels here
         channels = 64
         
         # Define the gps layers
@@ -48,7 +50,10 @@ class GPS(torch.nn.Module):
         )
         
         self.mpl_x = Linear(channels, channels)
-        self.bns = torch.nn.ModuleList(BatchNorm(channels) for _ in range(num_layers))
+        if norm == "GN":
+            self.bns = torch.nn.ModuleList(GraphNorm(channels) for _ in range(num_layers))
+        else:
+            self.bns = torch.nn.ModuleList(BatchNorm(channels) for _ in range(num_layers))
 
     def forward(self, x, edge_index):
         # Convert the initial transform
@@ -76,6 +81,7 @@ def build_model(
             channels=opt.input_dim,
             num_layers=opt.num_layers,
             attn_type="multihead",
+            norm=opt.norm,
             attn_kwargs=attn_kwargs,
         ).to(opt.device)
     else:
