@@ -284,7 +284,7 @@ def is_empty(path:str, datastore:Store):
 def fit_scaler(graph_data:Dict, cached_features_dir:str, datastore)->StandardScaler:
     print ("Fitting Scaler...")
     scaler = StandardScaler()
-    for p in tqdm(graph_data):
+    for p in tqdm(graph_data, disable=True):
         df_f = pd.read_parquet(
                     datastore.open_file(os.path.join(cached_features_dir, f"features_{p}.parquet"))
                 )
@@ -431,7 +431,6 @@ def _load_data(
     counters = {}
     graph_data = {}
     labelled = {}
-    others = {}
     for sp, A in df_p.groupby('split'):
         graph_data[sp] = {
             x: None
@@ -445,7 +444,7 @@ def _load_data(
 
     # Retrieve features and edges dataframes
     for sp in splits:
-        for p in tqdm(graph_data[sp]):
+        for p in tqdm(graph_data[sp], disable=True):
             labels_partition_filepath = os.path.join(labels_dir, f"labels_{p}.parquet")
             features_partition_filepath = os.path.join(cached_features_dir, f"features_{p}.parquet")
             edges_partition_filepath = os.path.join(cached_edges_dir, f"edges_{p}.parquet")
@@ -473,8 +472,6 @@ def _load_data(
                 datastore.to_features_pandas(df_f, features_partition_filepath)
                 datastore.to_features_pandas(df_e, edges_partition_filepath)
 
-    # use the default names if the cache is regenerated else we keep to the legacy names from the old cache
-
     # If it's a train loop and there is no pre-fitted scaler
     if (
         (DATA_LABEL_TRAIN in splits)
@@ -486,7 +483,7 @@ def _load_data(
     # Convert cache into a geometric dataset
     print("Loading Cached Data for Training...")
     for sp in splits:
-        for p in tqdm(graph_data[sp]):
+        for p in tqdm(graph_data[sp], disable=True):
             labels_partition_filepath = os.path.join(labels_dir, f"labels_{p}.parquet")
             features_partition_filepath = os.path.join(cached_features_dir, f"features_{p}.parquet")
             edges_partition_filepath = os.path.join(cached_edges_dir, f"edges_{p}.parquet")

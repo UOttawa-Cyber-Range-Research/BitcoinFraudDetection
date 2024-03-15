@@ -32,8 +32,9 @@ class GAT(torch.nn.Module):
         output_dim, 
         heads,
         num_layers,
-        dropout, 
-        emb=False
+        dropout,
+        norm,
+        emb=False,
     ):
         super().__init__()
         conv_model = GATConv
@@ -67,7 +68,11 @@ class GAT(torch.nn.Module):
         self.emb = emb
         self.dropout = dropout
         self.num_layers = num_layers
-        self.bns = torch.nn.ModuleList(BatchNorm(heads * hidden_dim) for _ in range(self.num_layers))
+        
+        if norm == "GN":
+            self.bns = torch.nn.ModuleList(GraphNorm(heads * hidden_dim) for _ in range(self.num_layers))
+        else:
+            self.bns = torch.nn.ModuleList(BatchNorm(heads * hidden_dim) for _ in range(self.num_layers))
 
     def forward(self, x, adj_t):          
         for i in range(self.num_layers):
@@ -99,6 +104,7 @@ def build_model(
             heads=opt.heads,
             num_layers=opt.num_layers,
             dropout=opt.dropout,
+            norm=opt.norm,
             emb=True,
         ).to(opt.device)
     else:

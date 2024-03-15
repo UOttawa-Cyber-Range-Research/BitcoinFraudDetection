@@ -30,15 +30,25 @@ class GCN(torch.nn.Module):
             output_dim, 
             num_layers, 
             dropout,
+            norm,
         ):
 
         super().__init__()
+        
+        # GCN conv layers
         self.convs = torch.nn.ModuleList(
             [GCNConv(input_dim, hidden_dim)]
             + [GCNConv(hidden_dim, hidden_dim) for _ in range(num_layers - 2)]
             + [GCNConv(hidden_dim, output_dim)]
         )
-        self.bns = torch.nn.ModuleList(BatchNorm(hidden_dim) for _ in range(num_layers - 1))
+        
+        # Define the norm type
+        if norm == "GN":
+            self.bns = torch.nn.ModuleList(GraphNorm(hidden_dim) for _ in range(num_layers - 1))
+        else:
+            self.bns = torch.nn.ModuleList(BatchNorm(hidden_dim) for _ in range(num_layers - 1))
+            
+        # Dropout layer
         self.dropout = dropout
 
     def reset_parameters(self):
@@ -72,6 +82,7 @@ def build_model(
             output_dim=1,
             num_layers=opt.num_layers,
             dropout=opt.dropout,
+            norm=opt.norm,
         ).to(opt.device)
     else:
         raise NotImplementedError

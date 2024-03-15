@@ -27,6 +27,7 @@ class GraphSage(torch.nn.Module):
             output_dim, 
             num_layers, 
             dropout,
+            norm,
         ):
 
         super().__init__()
@@ -35,7 +36,10 @@ class GraphSage(torch.nn.Module):
             + [SAGEConv(hidden_dim, hidden_dim) for _ in range(num_layers - 2)]
             + [SAGEConv(hidden_dim, output_dim)]
         )
-        self.bns = torch.nn.ModuleList(BatchNorm(hidden_dim) for _ in range(num_layers - 1))
+        if norm == "GN":
+            self.bns = torch.nn.ModuleList(GraphNorm(hidden_dim) for _ in range(num_layers - 1))
+        else:
+            self.bns = torch.nn.ModuleList(BatchNorm(hidden_dim) for _ in range(num_layers - 1))
         self.dropout = dropout
 
     def reset_parameters(self):
@@ -68,6 +72,7 @@ def build_model(
             hidden_dim=opt.hidden_dim,
             output_dim=1,
             num_layers=opt.num_layers,
+            norm=opt.norm,
             dropout=opt.dropout,
         ).to(opt.device)
     else:
