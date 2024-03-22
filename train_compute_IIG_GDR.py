@@ -160,16 +160,6 @@ def train(
                 dis_ratio = 1. if float(dis_ratio) == float("-inf") else dis_ratio
                 _mvals['GDR'] += dis_ratio
                 
-                # if dis_ratio > 3:
-                #     print("$$$$$$$$$$$$$$$$$$$$$$$$$")
-                #     print(f"GDR : {dis_ratio}")
-                #     print(f"D intra : {distance_intra}")
-                #     print(f"D inter : {distance_inter}")
-                #     print(f"D diff : {distance_inter - distance_intra}")
-                #     print(v.x.shape)
-                #     print(v.edge_index.shape)
-                #     print("$$$$$$$$$$$$$$$$$$$$$$$$$")
-                
                 # Load the stuff for IIG
                 temp_data = v.x.data.cpu().numpy()
                 layer_self = out[_lab].data.cpu().numpy()
@@ -432,121 +422,127 @@ def main(opt):
     opt.input_dim = n_features
     print("n_features", opt.input_dim)
     
-    # build the model, optimizer, loss
-    model, optimizer, loss_fxn = build_model_opt_loss(
-        opt, class_weights
-    )
-    
-    # Define the learning rate schedulers
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
-                                                           patience=2,
-                                                           mode="min")
-
-    # some printing
-    print(model)
-
-    # number of trainable parameters
-    _mp = filter(lambda p: p.requires_grad, model.parameters())
-    print (f"Number of trainable parameters: {sum([np.prod(p.size()) for p in _mp])}")
-
-    # build the functions
-    (train, evaluate, train_args) = build_functions(opt)
-
-    if opt.tensorboard:
-        print ("activate tensorboard")
-        from utils import TensorboardWriter
-        _external_writer = TensorboardWriter(
-            os.path.join(opt.model_path, f"{opt.model}_logs")
+    # Loop over the layers and change the model
+    for num_layers in [2, 3, 4, 5, 6, 7, 8]:
+        
+        # Change the number of layers
+        opt.num_layers = num_layers
+        
+        # Build the model, optimizer, loss
+        model, optimizer, loss_fxn = build_model_opt_loss(
+            opt, class_weights
         )
-    else:
-        _external_writer = None
+        
+        # Define the learning rate schedulers
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
+                                                            patience=2,
+                                                            mode="min")
 
-    print ("Training started...")
-    os.makedirs(
-        opt.model_path, exist_ok=True
-    )
-    model_save_path = os.path.join(
-        opt.model_path, f'{opt.model}_{opt.data_path.split("/")[-1]}_{opt.norm}_{opt.rwpe}_normal.pt'
-    )
-    print (f"Saving model in \'{model_save_path}\'")
-    
-    # Define the placeholders for model training
-    best = 0
-    best_epoch = None
-    best_metric = opt.train_best_metric
-    
-    # Start the model training
-    print(f"Transform before : {transform}")
-    for epoch in range(1, 1 + opt.epochs):
-        print("*" * 50 + f"Epoch : {epoch}" + "*" * 50)
-        meta = train(
-            model=model, data=data[DATA_LABEL_TRAIN], 
-            labelled=labelled[DATA_LABEL_TRAIN], 
-            optimizer=optimizer, loss_fn=loss_fxn, **train_args,
-            device=opt.device,
-            transform=transform,
-            scheduler=scheduler,
+        # Some printing
+        print(model)
+
+        # number of trainable parameters
+        _mp = filter(lambda p: p.requires_grad, model.parameters())
+        print (f"Number of trainable parameters: {sum([np.prod(p.size()) for p in _mp])}")
+
+        # build the functions
+        (train, evaluate, train_args) = build_functions(opt)
+
+        if opt.tensorboard:
+            print ("activate tensorboard")
+            from utils import TensorboardWriter
+            _external_writer = TensorboardWriter(
+                os.path.join(opt.model_path, f"{opt.model}_logs")
+            )
+        else:
+            _external_writer = None
+
+        print ("Training started...")
+        os.makedirs(
+            opt.model_path, exist_ok=True
         )
-
-        held_out_results = {}
-        for k in [DATA_LABEL_VAL, DATA_LABEL_TEST]:
-            held_out_results[k], _ = evaluate(
-                model, 
-                loss_fxn,
-                data[k], labelled[k],
+        model_save_path = os.path.join(
+            opt.model_path, f'{opt.model}_{opt.data_path.split("/")[-1]}_{opt.norm}_{opt.rwpe}_normal.pt'
+        )
+        print (f"Saving model in \'{model_save_path}\'")
+        
+        # Define the placeholders for model training
+        best = 0
+        best_epoch = None
+        best_metric = opt.train_best_metric
+        
+        # Start the model training
+        print(f"Transform before : {transform}")
+        for epoch in range(1, 1 + opt.epochs):
+            print("*" * 50 + f"Epoch : {epoch}" + "*" * 50)
+            meta = train(
+                model=model, data=data[DATA_LABEL_TRAIN], 
+                labelled=labelled[DATA_LABEL_TRAIN], 
+                optimizer=optimizer, loss_fn=loss_fxn, **train_args,
                 device=opt.device,
                 transform=transform,
+                scheduler=scheduler,
             )
+
+            held_out_results = {}
+            for k in [DATA_LABEL_VAL, DATA_LABEL_TEST]:
+                held_out_results[k], _ = evaluate(
+                    model, 
+                    loss_fxn,
+                    data[k], labelled[k],
+                    device=opt.device,
+                    transform=transform,
+                )
+                
+            # Print the metric
+            meta_a = held_out_results[DATA_LABEL_VAL]
+            meta_b = held_out_results[DATA_LABEL_TEST]
+            print(f"Train | Loss : {meta['loss']} | Bacc : {meta['bacc']} | Auroc : {meta['auroc']} | F1-score : {meta['f1_score']} | GDR : {meta['GDR']} | IIG : {meta['IIG']}")
+            print(f"Valid | Loss : {meta_a['loss']} | Bacc : {meta_a['bacc']} | Auroc : {meta_a['auroc']} | F1-score : {meta_a['f1_score']} | GDR : {meta_a['GDR']} | IIG : {meta_a['IIG']}")
+            print(f"Test  | Loss : {meta_b['loss']} | Bacc : {meta_b['bacc']} | Auroc : {meta_b['auroc']} | F1-score : {meta_b['f1_score']} | GDR : {meta_b['GDR']} | IIG : {meta_b['IIG']}")
+            print(f"Learning Rate : {optimizer.param_groups[0]['lr']}")
+            print(f"*" * 100)
             
-        # Print the metric
-        meta_a = held_out_results[DATA_LABEL_VAL]
-        meta_b = held_out_results[DATA_LABEL_TEST]
-        print(f"Train | Loss : {meta['loss']} | Bacc : {meta['bacc']} | Auroc : {meta['auroc']} | F1-score : {meta['f1_score']} | GDR : {meta['GDR']} | IIG : {meta['IIG']}")
-        print(f"Valid | Loss : {meta_a['loss']} | Bacc : {meta_a['bacc']} | Auroc : {meta_a['auroc']} | F1-score : {meta_a['f1_score']} | GDR : {meta_a['GDR']} | IIG : {meta_a['IIG']}")
-        print(f"Test  | Loss : {meta_b['loss']} | Bacc : {meta_b['bacc']} | Auroc : {meta_b['auroc']} | F1-score : {meta_b['f1_score']} | GDR : {meta_b['GDR']} | IIG : {meta_b['IIG']}")
-        print(f"Learning Rate : {optimizer.param_groups[0]['lr']}")
-        print(f"*" * 100)
-        
-        # Step the scheduler
-        scheduler.step(meta_a['loss'])
+            # Step the scheduler
+            scheduler.step(meta_a['loss'])
 
-        # Extract the held out database
-        _metric = held_out_results[DATA_LABEL_VAL][best_metric] 
-        
-        # Check if the metric has improved over the last best
-        if _metric > best:
-            best = _metric
-            best_test = held_out_results[DATA_LABEL_TEST][best_metric] 
-            best_epoch = epoch
+            # Extract the held out database
+            _metric = held_out_results[DATA_LABEL_VAL][best_metric] 
+            
+            # Check if the metric has improved over the last best
+            if _metric > best:
+                best = _metric
+                best_test = held_out_results[DATA_LABEL_TEST][best_metric] 
+                best_epoch = epoch
 
-            print ("Saving model", best, _metric, best_epoch)
-            torch.save(
-                {
-                    "state_dict": model.state_dict(),
-                    "metrics": {
-                        'epoch': epoch,
-                        'best_metric': best_metric,
-                        **held_out_results,
-                    }, 
-                    "opt": export_args(opt),
-                    "scaler": scaler, 
-                    "feature_names": feature_names,
-                },
-                model_save_path
-            )
-        
-        if _external_writer:
-            _external_writer.write(
-                "loss/train", meta['loss'], epoch
-            )
+                print ("Saving model", best, _metric, best_epoch)
+                torch.save(
+                    {
+                        "state_dict": model.state_dict(),
+                        "metrics": {
+                            'epoch': epoch,
+                            'best_metric': best_metric,
+                            **held_out_results,
+                        }, 
+                        "opt": export_args(opt),
+                        "scaler": scaler, 
+                        "feature_names": feature_names,
+                    },
+                    model_save_path
+                )
+            
+            if _external_writer:
+                _external_writer.write(
+                    "loss/train", meta['loss'], epoch
+                )
 
-            for k,v in held_out_results.items():
-                for k2 in v:
-                    _external_writer.write(
-                        f"{k2}/{k}", 
-                        v[k2], 
-                        epoch
-                    )
+                for k,v in held_out_results.items():
+                    for k2 in v:
+                        _external_writer.write(
+                            f"{k2}/{k}", 
+                            v[k2], 
+                            epoch
+                        )
 
 
 # build the parser depending on the model

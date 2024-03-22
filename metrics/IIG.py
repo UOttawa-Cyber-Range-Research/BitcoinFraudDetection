@@ -47,7 +47,7 @@ def mi_kde(h, inputdata, var=0.1):
     # var: noise variance used in estimate the mutual information in KDE
     model_out_a = h
     model_out_b = 1 - model_out_a
-    h = np.concatenate((model_out_a, model_out_b), axis=-1)
+    h = np.concatenate((model_out_b, model_out_a), axis=-1)
     
     nats2bits = float(1.0 / np.log(2))
     h_norm = np.sum(np.square(h), axis=1, keepdims=True)

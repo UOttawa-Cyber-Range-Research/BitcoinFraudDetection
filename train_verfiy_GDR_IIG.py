@@ -16,6 +16,9 @@ from metrics.IIG import *
 from metrics.GDR import *
 from utils import *
 import torch_geometric.transforms as T
+from torch_geometric.datasets import Planetoid
+from torch_geometric.datasets import Coauthor
+from torch_geometric.utils import remove_self_loops, add_self_loops
 
 # ----------------------------------------------------------
 # ARGS
@@ -66,6 +69,119 @@ import sklearn.metrics
 from typing import Dict
 import warnings
 
+def cluster_dist_metric(model_out, num_classes=2, gt_label=None):
+    '''
+    Implements the inter and intra clsuter distance for a sequence of graph
+    '''
+    
+    # Placeholder
+    X_labels = []
+    
+    # Loop and set the labels
+    for i in range(num_classes):
+        X_label = model_out[gt_label == i]
+        
+        # Check if torch tensor
+        if type(X_label) == torch.Tensor:
+            X_label = X_label.data.cpu().numpy()
+        
+        # Calculate the norm
+        h_norm = np.sum(np.square(X_label), axis=1, keepdims=True)
+        h_norm[h_norm == 0.] = 1e-3
+        X_label = X_label / np.sqrt(h_norm)
+        X_labels.append(X_label)
+
+    # Intra cluster distance
+    dis_intra = 0.0
+    for i in range(num_classes):
+        x2 = np.sum(np.square(X_labels[i]), axis=1, keepdims=True)
+        dists = x2 + x2.T - 2 * np.matmul(X_labels[i], X_labels[i].T)
+        dis_intra += np.mean(dists)
+    dis_intra /= num_classes
+    
+    # Inter cluster distance
+    dis_inter = 0.0
+    for i in range(num_classes-1):
+        for j in range(i+1, num_classes):
+            x2_i = np.sum(np.square(X_labels[i]), axis=1, keepdims=True)
+            x2_j = np.sum(np.square(X_labels[j]), axis=1, keepdims=True)
+            dists = x2_i + x2_j.T - 2 * np.matmul(X_labels[i], X_labels[j].T)
+            dis_inter += np.mean(dists)
+    num_inter = float(num_classes * (num_classes-1) / 2)
+    dis_inter /= num_inter
+
+    return dis_intra, dis_inter
+
+def get_unique_probs(x):
+    uniqueids = np.ascontiguousarray(x).view(np.dtype((np.void, x.dtype.itemsize * x.shape[1])))
+    _, unique_inverse, unique_counts = np.unique(uniqueids, return_index=False, return_inverse=True, return_counts=True)
+    return np.asarray(unique_counts / float(sum(unique_counts))), unique_inverse
+
+def Kget_dists(X):
+    """Keras code to compute the pairwise distance matrix for a set of
+    vectors specifie by the matrix X.
+    """
+    x2 = np.sum(np.square(X), axis=1, keepdims=True)
+    dists = x2 + x2.T - 2 * np.matmul(X, X.T)
+    return dists
+
+def entropy_estimator_kl(x, var):
+    # KL-based upper bound on entropy of mixture of Gaussians with covariance matrix var * I
+    #  see Kolchinsky and Tracey, Estimating Mixture Entropy with Pairwise Distances, Entropy, 2017. Section 4.
+    #  and Kolchinsky and Tracey, Nonlinear Information Bottleneck, 2017. Eq. 10
+    dims, N = float(x.shape[1]), float(x.shape[0])
+    dists = Kget_dists(x)
+    dists2 = dists / (2*var)
+    normconst = (dims / 2.0) * np.log(2 * np.pi * var)
+    lprobs = np.log(np.sum(np.exp(-dists2), axis=1)) - np.log(N) - normconst
+    h = -np.mean(lprobs)
+
+    return dims/2 + h
+
+def entropy_estimator_bd(x, var):
+    # Bhattacharyya-based lower bound on entropy of mixture of Gaussians with covariance matrix var * I
+    #  see Kolchinsky and Tracey, Estimating Mixture Entropy with Pairwise Distances, Entropy, 2017. Section 4.
+    dims, N = float(x.shape[1]), float(x.shape[0])
+    val = entropy_estimator_kl(x,4*var)
+    return val + np.log(0.25)*dims/2
+
+def kde_condentropy(x, var):
+    # Return entropy of a multivariate Gaussian, in nats
+    dims = x.shape[1]
+    return (dims/2.0)*(np.log(2*np.pi*var) + 1)
+
+
+def mi_kde(h, inputdata, var=0.1):
+    # function: compute the mutual information between the input and the final representation
+    # h: hidden representation at the final layer
+    # inputdata: the input attribute matrix X
+    # var: noise variance used in estimate the mutual information in KDE    
+    nats2bits = float(1.0 / np.log(2))
+    h_norm = np.sum(np.square(h), axis=1, keepdims=True)
+    h_norm[h_norm == 0.] = 1e-3
+    h = h / np.sqrt(h_norm)
+    input_norm = np.sum(np.square(inputdata), axis=1, keepdims=True)
+    input_norm[input_norm == 0.] = 1e-3
+    inputdata = inputdata / np.sqrt(input_norm)
+
+    # the entropy of the input
+    entropy_input = entropy_estimator_bd(inputdata, var)
+
+    # compute the entropy of input given the hidden representation at the final layer
+    entropy_input_h = 0.
+    indices = np.argmax(h, axis=1)
+    indices = np.expand_dims(indices, axis=1)
+    p_h, unique_inverse_h = get_unique_probs(indices)
+    p_h = np.asarray(p_h).T
+    for i in range(len(p_h)):
+        labelixs = unique_inverse_h==i
+        entropy_input_h += p_h[i] * entropy_estimator_bd(inputdata[labelixs, :], var)
+
+    # the mutual information between the input and the hidden representation at the final layer
+    MI_HX = entropy_input - entropy_input_h
+
+    return nats2bits*MI_HX
+
 # to build the metrics
 def metrics(name: str, **kwargs):
     import torchmetrics
@@ -102,7 +218,7 @@ def metrics(name: str, **kwargs):
 from collections import defaultdict
 
 def train(
-    model, data: Dict, labelled, 
+    model, data: Dict,
     optimizer, loss_fn,
     accum_gradients=1,
     device=torch.device("cpu"),
@@ -123,12 +239,8 @@ def train(
     itr = 0
     skipped = 0
     loss_meter = AverageMeter()
-    for _, (k, v) in tqdm(enumerate(data.items()), total=len(data), disable=True):
+    for _, v in tqdm(enumerate(data), total=len(data), disable=False):
         if v.edge_index.max() < v.num_nodes:
-            # Transform the dataset
-            if transform:
-                v = transform(v)
-                
             # Zero the gradient
             optimizer.zero_grad()
             
@@ -136,10 +248,9 @@ def train(
             out = model(v.x, v.edge_index)
             
             # Find the loss value
-            _lab = labelled[k]
             loss = loss_fn(
-                out[_lab], 
-                v.y[_lab].unsqueeze(dim=-1)
+                out[v.train_mask],
+                v.y[v.train_mask]
             )
 
             # Backprop
@@ -151,58 +262,24 @@ def train(
             
             try:
                 # Mutual Information and add it to the metric list
-                distance_intra, distance_inter = cluster_dist_metric(torch.sigmoid(out[_lab]),
-                                                                     num_classes=2,
-                                                                     gt_label=v.y[_lab])
+                distance_intra, distance_inter = cluster_dist_metric(torch.nn.functional.log_softmax(out[v.train_mask], -1),
+                                                                     num_classes=7,
+                                                                     gt_label=v.y[v.train_mask])
                 dis_ratio = distance_inter / distance_intra
                 dis_ratio = 1. if np.isnan(dis_ratio) else dis_ratio
                 dis_ratio = 1. if float(dis_ratio) == float("inf") else dis_ratio
                 dis_ratio = 1. if float(dis_ratio) == float("-inf") else dis_ratio
                 _mvals['GDR'] += dis_ratio
                 
-                # if dis_ratio > 3:
-                #     print("$$$$$$$$$$$$$$$$$$$$$$$$$")
-                #     print(f"GDR : {dis_ratio}")
-                #     print(f"D intra : {distance_intra}")
-                #     print(f"D inter : {distance_inter}")
-                #     print(f"D diff : {distance_inter - distance_intra}")
-                #     print(v.x.shape)
-                #     print(v.edge_index.shape)
-                #     print("$$$$$$$$$$$$$$$$$$$$$$$$$")
-                
                 # Load the stuff for IIG
                 temp_data = v.x.data.cpu().numpy()
-                layer_self = out[_lab].data.cpu().numpy()
+                layer_self = out.data.cpu().numpy()
                 MI_XiX = mi_kde(layer_self, temp_data, var=0.1)
                 _mvals['IIG'] += MI_XiX
                 
-                # Used by all metrics
-                common = torch.sigmoid(out[_lab]).detach().cpu()
-                
-                # Auroc
-                _mvals['auroc'] += sklearn.metrics.roc_auc_score(
-                    v.y[_lab].cpu(),
-                    common,
-                )
-                
-                # F1-score
-                f1_help = (common > 0.5).long()
-                _mvals['f1_score'] += sklearn.metrics.f1_score(
-                    v.y[_lab].cpu().long().squeeze(),
-                    f1_help.view(-1).squeeze(),
-                )
-
-                # Fetch torchmetrics metrics
-                for k, m in _metrics.items():
-                    for k2, v in m(
-                        torch.sigmoid(out[_lab]).squeeze(),
-                        v.y_i[_lab].squeeze(),
-                    ).items():
-                        _mvals[k2] += v
-                        
                 # Increment the iterator
                 itr += 1
-            except:
+            except Exception as e:
                 pass
         else:
             skipped += 1
@@ -216,7 +293,7 @@ def train(
 
 @torch.no_grad()
 def evaluate(
-    model, loss_fn, data, labelled, 
+    model, loss_fn, data, split, 
     device=torch.device("cpu"),
     transform=None,
 ):
@@ -231,28 +308,24 @@ def evaluate(
     
     # Define the loss meter
     loss_meter = AverageMeter()
-    
+        
     # Evaluate
     itr = 0
-    for k, v in data.items():
+    for v in data:
+        if split == "val":
+            split_chosen = v.val_mask
+        else:
+            split_chosen = v.test_mask
+            
         # Check if graphs are good
-        if v.edge_index.max() < v.num_nodes:
-            
-            # Collect the model output
-            if transform:
-                v = transform(v)
-            
+        if v.edge_index.max() < v.num_nodes:            
             # Get the model output
             out = model(v.x, v.edge_index)
             
-            # Get the labelled indexes
-            _lab = labelled[k]
-            
             # Find the loss value
-            _lab = labelled[k]
             loss = loss_fn(
-                out[_lab], 
-                v.y[_lab].unsqueeze(dim=-1)
+                out[split_chosen], 
+                v.y[split_chosen]
             )
             
             # Update the loss meter
@@ -261,9 +334,9 @@ def evaluate(
             # Get the metrics
             try:
                 # Mutual Information and add it to the metric list
-                distance_intra, distance_inter = cluster_dist_metric(torch.sigmoid(out[_lab]),
-                                                                    num_classes=2,
-                                                                    gt_label=v.y[_lab])
+                distance_intra, distance_inter = cluster_dist_metric(torch.nn.functional.log_softmax(out[split_chosen], -1),
+                                                                     num_classes=7,
+                                                                     gt_label=v.y[split_chosen])
                 dis_ratio = distance_inter / distance_intra
                 dis_ratio = 1. if np.isnan(dis_ratio) else dis_ratio
                 dis_ratio = 1. if float(dis_ratio) == float("inf") else dis_ratio
@@ -272,33 +345,9 @@ def evaluate(
                 
                 # Load the stuff for IIG
                 temp_data = v.x.data.cpu().numpy()
-                layer_self = out[_lab].data.cpu().numpy()
+                layer_self = out.data.cpu().numpy()
                 MI_XiX = mi_kde(layer_self, temp_data, var=0.1)
                 _mvals['IIG'] += MI_XiX
-                
-                # Used by all metrics
-                common = torch.sigmoid(out[_lab]).detach().cpu()
-                
-                # Auroc
-                _mvals['auroc'] += sklearn.metrics.roc_auc_score(
-                    v.y[_lab].cpu(),
-                    common,
-                )
-                
-                # F1-score
-                f1_help = (common > 0.5).long()
-                _mvals['f1_score'] += sklearn.metrics.f1_score(
-                    v.y[_lab].cpu().long().squeeze(),
-                    f1_help.view(-1).squeeze(),
-                )
-
-                # see comments in train
-                for k, m in _metrics.items():
-                    for k2, v in m(
-                        torch.sigmoid(out[_lab]).squeeze(),
-                        v.y_i[_lab].squeeze(),
-                    ).items():
-                        _mvals[k2] += v
                         
                 # Increment the iterator
                 itr += 1
@@ -310,36 +359,6 @@ def evaluate(
         **{k: round(v / itr, ndigits=4) for k,v in _mvals.items()},
     }, None
 
-
-from datasets.types import DATA_LABEL_TRAIN, DATA_LABEL_VAL, DATA_LABEL_TEST
-
-# load data into tensors
-def load_data(opt, **kwargs):
-    from datasets.loader import load_data, FEATURE_COLUMNS
-    
-    _add_f = opt.additional_features 
-    if _add_f is None:
-        _add_f = []
-    data, labelled, scaler, feature_names = load_data(
-        opt.data_path,
-        opt.device,
-        debug=opt.debug,
-        semi_supervised=opt.data_disable_semi_sup == False,
-        semi_supervised_resample_negs=opt.resample_semi_sup,
-        semi_supervised_resample_factor=opt.resample_factor_semi_sup,
-        feature_column_names=FEATURE_COLUMNS + _add_f,
-        features_dir=opt.features_dir, # used for duckdb queries
-        refresh_cache=opt.refresh_cache,
-        **kwargs
-    )
-    n_features = len(feature_names)
-    print(feature_names)
-    class_weights = opt.class_weight
-
-    return (
-        data, labelled, scaler, feature_names,
-        n_features, class_weights
-    )
 
 # build the model, optimizer, loss
 def build_model_opt_loss(opt, class_weights):
@@ -376,7 +395,7 @@ def build_model_opt_loss(opt, class_weights):
         )
     elif opt.model == 'rggcn':
         import models.rggcn
-        model, optimizer, loss = models.rggcn.build_model(
+        model, optimizer, loss = models.rggcn_cora.build_model(
             opt,
             class_weights=class_weights,
         )
@@ -411,20 +430,21 @@ def build_functions(opt):
 # ----------------------------------------------------------
 def main(opt):
     # Fetch the dataset
-    data, labelled, scaler, feature_names, n_features, class_weights = load_data(opt)
+    path = "./Cora"
+    data = Planetoid(path, "Cora", transform=T.NormalizeFeatures())[0]
+    num_nodes = data.x.size(0)
+    edge_index, _ = remove_self_loops(data.edge_index)
+    edge_index = add_self_loops(edge_index, num_nodes=num_nodes)
     
-    # Check if the random walk is there or not
-    if opt.rwpe == "true":
-        print("Using Random Walks...")
-        # Define the transforms here
-        transform = T.Compose([T.AddRandomWalkPE(walk_length=opt.walk_length,
-                                                attr_name=None)])
-        
-        # Add the walk features to to the total feature for model construction
-        n_features += opt.walk_length
+    if isinstance(edge_index, tuple):
+        data.edge_index = edge_index[0]
     else:
-        print("Not using Random Walks...")
-        transform = None
+        data.edge_index = edge_index
+        
+    data = data.to('cuda')
+        
+    # Define the number of features
+    n_features = data.x.shape[-1]
     
     print(f"Total features : {n_features}")
 
@@ -434,7 +454,7 @@ def main(opt):
     
     # build the model, optimizer, loss
     model, optimizer, loss_fxn = build_model_opt_loss(
-        opt, class_weights
+        opt, 1.0
     )
     
     # Define the learning rate schedulers
@@ -476,77 +496,35 @@ def main(opt):
     best_metric = opt.train_best_metric
     
     # Start the model training
-    print(f"Transform before : {transform}")
     for epoch in range(1, 1 + opt.epochs):
         print("*" * 50 + f"Epoch : {epoch}" + "*" * 50)
         meta = train(
-            model=model, data=data[DATA_LABEL_TRAIN], 
-            labelled=labelled[DATA_LABEL_TRAIN], 
+            model=model, data=[data], 
             optimizer=optimizer, loss_fn=loss_fxn, **train_args,
             device=opt.device,
-            transform=transform,
             scheduler=scheduler,
         )
 
         held_out_results = {}
-        for k in [DATA_LABEL_VAL, DATA_LABEL_TEST]:
+        for k in ["val", "test"]:
             held_out_results[k], _ = evaluate(
                 model, 
                 loss_fxn,
-                data[k], labelled[k],
+                [data],
+                k,
                 device=opt.device,
-                transform=transform,
             )
-            
         # Print the metric
-        meta_a = held_out_results[DATA_LABEL_VAL]
-        meta_b = held_out_results[DATA_LABEL_TEST]
-        print(f"Train | Loss : {meta['loss']} | Bacc : {meta['bacc']} | Auroc : {meta['auroc']} | F1-score : {meta['f1_score']} | GDR : {meta['GDR']} | IIG : {meta['IIG']}")
-        print(f"Valid | Loss : {meta_a['loss']} | Bacc : {meta_a['bacc']} | Auroc : {meta_a['auroc']} | F1-score : {meta_a['f1_score']} | GDR : {meta_a['GDR']} | IIG : {meta_a['IIG']}")
-        print(f"Test  | Loss : {meta_b['loss']} | Bacc : {meta_b['bacc']} | Auroc : {meta_b['auroc']} | F1-score : {meta_b['f1_score']} | GDR : {meta_b['GDR']} | IIG : {meta_b['IIG']}")
+        meta_a = held_out_results["val"]
+        meta_b = held_out_results["test"]
+        print(f"Train | Loss : {meta['loss']} | GDR : {meta['GDR']} | IIG : {meta['IIG']}")
+        print(f"Valid | Loss : {meta_a['loss']} | GDR : {meta_a['GDR']} | IIG : {meta_a['IIG']}")
+        print(f"Test  | Loss : {meta_b['loss']} | GDR : {meta_b['GDR']} | IIG : {meta_b['IIG']}")
         print(f"Learning Rate : {optimizer.param_groups[0]['lr']}")
         print(f"*" * 100)
         
         # Step the scheduler
         scheduler.step(meta_a['loss'])
-
-        # Extract the held out database
-        _metric = held_out_results[DATA_LABEL_VAL][best_metric] 
-        
-        # Check if the metric has improved over the last best
-        if _metric > best:
-            best = _metric
-            best_test = held_out_results[DATA_LABEL_TEST][best_metric] 
-            best_epoch = epoch
-
-            print ("Saving model", best, _metric, best_epoch)
-            torch.save(
-                {
-                    "state_dict": model.state_dict(),
-                    "metrics": {
-                        'epoch': epoch,
-                        'best_metric': best_metric,
-                        **held_out_results,
-                    }, 
-                    "opt": export_args(opt),
-                    "scaler": scaler, 
-                    "feature_names": feature_names,
-                },
-                model_save_path
-            )
-        
-        if _external_writer:
-            _external_writer.write(
-                "loss/train", meta['loss'], epoch
-            )
-
-            for k,v in held_out_results.items():
-                for k2 in v:
-                    _external_writer.write(
-                        f"{k2}/{k}", 
-                        v[k2], 
-                        epoch
-                    )
 
 
 # build the parser depending on the model
@@ -565,10 +543,10 @@ def embelish_model_args(m: str, parser):
         return models.egraphsage.args(parser)
     elif m == "gps":
         import models.gps
-        return models.gps.args(parser)
+        return models.gps.args(parser) 
     elif m == "rggcn":
-        import models.rggcn
-        return models.rggcn.args(parser)
+        import models.rggcn_cora
+        return models.rggcn_cora.args(parser)
     elif m == "gs":
         import models.gs
         return models.gs.args(parser)
