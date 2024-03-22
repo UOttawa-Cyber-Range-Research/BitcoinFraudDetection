@@ -1,5 +1,4 @@
 # IBM Research Singapore, 2022
-
 # loader that reads from parquets using duckdb SQL style
 
 import pandas as pd
@@ -434,11 +433,11 @@ def _load_data(
     for sp, A in df_p.groupby('split'):
         graph_data[sp] = {
             x: None
-            for x in sorted(A['index'])
+            for x in sorted(A['index'][:100])
         }
         labelled[sp] = {
             x: None
-            for x in sorted(A['index'])
+            for x in sorted(A['index'][:100])
         }
         counters[sp] = Counter()
 
