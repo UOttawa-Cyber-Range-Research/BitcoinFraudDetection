@@ -433,11 +433,11 @@ def _load_data(
     for sp, A in df_p.groupby('split'):
         graph_data[sp] = {
             x: None
-            for x in sorted(A['index'][:100])
+            for x in sorted(A['index'])
         }
         labelled[sp] = {
             x: None
-            for x in sorted(A['index'][:100])
+            for x in sorted(A['index'])
         }
         counters[sp] = Counter()
 

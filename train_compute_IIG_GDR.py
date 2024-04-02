@@ -7,9 +7,11 @@ warnings.simplefilter("ignore")
 
 import sys
 import torch
+import pprint
 import random
 import argparse
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 from typing import List, Optional
 from metrics.IIG import *
@@ -25,7 +27,7 @@ def common_args():
     parser = argparse.ArgumentParser("Train graphical models for bitcoin data")
 
     parser.add_argument('model') # first positional argument
-    parser.add_argument('-model_path', default='data/models')
+    parser.add_argument('-model_path', default='data/df')
     parser.add_argument('-rwpe', default="false")
     parser.add_argument('-walk_length', default=21)
     parser.add_argument('-model_accum_grads', type=int, default=1)
@@ -40,7 +42,7 @@ def common_args():
     parser.add_argument('-resample_factor_semi_sup', type=int, default=None)
     parser.add_argument('-additional_features', nargs='*')
     parser.add_argument('-train', action='store_false', default=True)
-    parser.add_argument('-train_best_metric', default='bacc')
+    parser.add_argument('-train_best_metric', default='f1_score')
     parser.add_argument('-epochs', type=int, default=12)
     parser.add_argument('-tensorboard', action='store_true', default=False)
     parser.add_argument('-debug', action='store_true', default=False)
@@ -196,8 +198,6 @@ def train(
                 pass
         else:
             skipped += 1
-    
-    print(f"Total skipped graphs : {skipped}")
     
     return {
         'loss': round(loss_meter.avg, ndigits=4),
@@ -422,11 +422,19 @@ def main(opt):
     opt.input_dim = n_features
     print("n_features", opt.input_dim)
     
+    # Placeholder for the data
+    list_data_train = []
+    list_data_valid = []
+    list_data_test = []
+    
     # Loop over the layers and change the model
     for num_layers in [2, 3, 4, 5, 6, 7, 8]:
         
         # Change the number of layers
         opt.num_layers = num_layers
+        
+        print("arguments:")
+        print(opt)
         
         # Build the model, optimizer, loss
         model, optimizer, loss_fxn = build_model_opt_loss(
@@ -435,8 +443,8 @@ def main(opt):
         
         # Define the learning rate schedulers
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
-                                                            patience=2,
-                                                            mode="min")
+                                                               patience=2,
+                                                               mode="min")
 
         # Some printing
         print(model)
@@ -462,19 +470,17 @@ def main(opt):
             opt.model_path, exist_ok=True
         )
         model_save_path = os.path.join(
-            opt.model_path, f'{opt.model}_{opt.data_path.split("/")[-1]}_{opt.norm}_{opt.rwpe}_normal.pt'
+            opt.model_path, f'{opt.model}_{opt.data_path.split("/")[-1]}_{opt.norm}_{opt.rwpe}_normal'
         )
         print (f"Saving model in \'{model_save_path}\'")
         
         # Define the placeholders for model training
         best = 0
-        best_epoch = None
         best_metric = opt.train_best_metric
         
         # Start the model training
         print(f"Transform before : {transform}")
-        for epoch in range(1, 1 + opt.epochs):
-            print("*" * 50 + f"Epoch : {epoch}" + "*" * 50)
+        for _ in tqdm(range(1, 1 + opt.epochs), total=opt.epochs):
             meta = train(
                 model=model, data=data[DATA_LABEL_TRAIN], 
                 labelled=labelled[DATA_LABEL_TRAIN], 
@@ -497,11 +503,6 @@ def main(opt):
             # Print the metric
             meta_a = held_out_results[DATA_LABEL_VAL]
             meta_b = held_out_results[DATA_LABEL_TEST]
-            print(f"Train | Loss : {meta['loss']} | Bacc : {meta['bacc']} | Auroc : {meta['auroc']} | F1-score : {meta['f1_score']} | GDR : {meta['GDR']} | IIG : {meta['IIG']}")
-            print(f"Valid | Loss : {meta_a['loss']} | Bacc : {meta_a['bacc']} | Auroc : {meta_a['auroc']} | F1-score : {meta_a['f1_score']} | GDR : {meta_a['GDR']} | IIG : {meta_a['IIG']}")
-            print(f"Test  | Loss : {meta_b['loss']} | Bacc : {meta_b['bacc']} | Auroc : {meta_b['auroc']} | F1-score : {meta_b['f1_score']} | GDR : {meta_b['GDR']} | IIG : {meta_b['IIG']}")
-            print(f"Learning Rate : {optimizer.param_groups[0]['lr']}")
-            print(f"*" * 100)
             
             # Step the scheduler
             scheduler.step(meta_a['loss'])
@@ -512,38 +513,31 @@ def main(opt):
             # Check if the metric has improved over the last best
             if _metric > best:
                 best = _metric
-                best_test = held_out_results[DATA_LABEL_TEST][best_metric] 
-                best_epoch = epoch
-
-                print ("Saving model", best, _metric, best_epoch)
-                torch.save(
-                    {
-                        "state_dict": model.state_dict(),
-                        "metrics": {
-                            'epoch': epoch,
-                            'best_metric': best_metric,
-                            **held_out_results,
-                        }, 
-                        "opt": export_args(opt),
-                        "scaler": scaler, 
-                        "feature_names": feature_names,
-                    },
-                    model_save_path
-                )
-            
-            if _external_writer:
-                _external_writer.write(
-                    "loss/train", meta['loss'], epoch
-                )
-
-                for k,v in held_out_results.items():
-                    for k2 in v:
-                        _external_writer.write(
-                            f"{k2}/{k}", 
-                            v[k2], 
-                            epoch
-                        )
-
+                best_train = meta
+                best_test = held_out_results[DATA_LABEL_TEST]
+                best_valid = held_out_results[DATA_LABEL_VAL]
+                
+        # Save the best data across all the epochs
+        list_data_train.append([num_layers, best_train['loss'], best_train['bacc'], best_train['auroc'], best_train['f1_score'], best_train['GDR'], best_train['IIG']])
+        list_data_valid.append([num_layers, best_valid['loss'], best_valid['bacc'], best_valid['auroc'], best_valid['f1_score'], best_valid['GDR'], best_valid['IIG']])
+        list_data_test.append([num_layers, best_test['loss'], best_test['bacc'], best_test['auroc'], best_test['f1_score'], best_test['GDR'], best_test['IIG']])
+        
+        # Print for testing
+        pprint.pprint(list_data_train)
+        pprint.pprint(list_data_valid)
+        pprint.pprint(list_data_test)
+        
+    # Make the dataframe and save the data
+    data_columns = ["num_layers", "loss", "bacc", "auroc", "f1_score", "gdr", "iig"]
+    metric_train_df = pd.DataFrame(list_data_train, columns=data_columns)
+    metric_valid_df = pd.DataFrame(list_data_valid, columns=data_columns)
+    metric_test_df = pd.DataFrame(list_data_test, columns=data_columns)
+    
+    # Save the dataframe
+    metric_train_df.to_csv(model_save_path + "_train.csv", index=False)
+    metric_valid_df.to_csv(model_save_path + "_valid.csv", index=False)
+    metric_test_df.to_csv(model_save_path + "_test.csv", index=False)
+    print("Done.....")
 
 # build the parser depending on the model
 def embelish_model_args(m: str, parser):
@@ -582,9 +576,6 @@ if __name__ == '__main__':
     )
 
     opt = parse_args(parser)
-
-    print("arguments:")
-    print(opt)
 
     # Seed everything
     seed_everything(10)
