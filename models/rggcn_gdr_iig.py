@@ -71,7 +71,7 @@ def build_model(
         model = ResGatedGCN(
             input_dim=opt.input_dim,
             hidden_dim=opt.hidden_dim,
-            output_dim=1,
+            output_dim=2,
             num_layers=opt.num_layers,
             dropout=opt.dropout,
             norm=opt.norm,
@@ -89,8 +89,8 @@ def build_model(
         lr=opt.lr,
         weight_decay=5e-3,
     )
-    loss_fn = torch.nn.BCEWithLogitsLoss(
-        pos_weight=torch.tensor(class_weights),
+    loss_fn = torch.nn.CrossEntropyLoss(
+        weight=torch.tensor([1.0, class_weights]),
     ).to(opt.device)
 
     return model, optimizer, loss_fn
