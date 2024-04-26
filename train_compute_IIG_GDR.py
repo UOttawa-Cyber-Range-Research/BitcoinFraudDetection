@@ -156,7 +156,8 @@ def train(
                 distance_intra, distance_inter = cluster_dist_metric(torch.sigmoid(out[_lab]),
                                                                      num_classes=2,
                                                                      gt_label=v.y[_lab])
-                dis_ratio = distance_inter / distance_intra
+                distance_gap = distance_inter - distance_intra
+                dis_ratio = 1. if distance_gap < 0 else distance_inter / distance_intra
                 dis_ratio = 1. if np.isnan(dis_ratio) else dis_ratio
                 dis_ratio = 1. if float(dis_ratio) == float("inf") else dis_ratio
                 dis_ratio = 1. if float(dis_ratio) == float("-inf") else dis_ratio
@@ -254,7 +255,8 @@ def evaluate(
                 distance_intra, distance_inter = cluster_dist_metric(torch.sigmoid(out[_lab]),
                                                                     num_classes=2,
                                                                     gt_label=v.y[_lab])
-                dis_ratio = distance_inter / distance_intra
+                distance_gap = distance_inter - distance_intra
+                dis_ratio = 1. if distance_gap < 0 else distance_inter / distance_intra
                 dis_ratio = 1. if np.isnan(dis_ratio) else dis_ratio
                 dis_ratio = 1. if float(dis_ratio) == float("inf") else dis_ratio
                 dis_ratio = 1. if float(dis_ratio) == float("-inf") else dis_ratio
@@ -443,7 +445,7 @@ def main(opt):
         
         # Define the learning rate schedulers
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
-                                                               patience=2,
+                                                               patience=1,
                                                                mode="min")
 
         # Some printing
@@ -475,8 +477,8 @@ def main(opt):
         print (f"Saving model in \'{model_save_path}\'")
         
         # Define the placeholders for model training
-        best = 0
-        best_metric = opt.train_best_metric
+        best = float("inf")
+        stopping_patience = 2
         
         # Start the model training
         print(f"Transform before : {transform}")
@@ -508,14 +510,22 @@ def main(opt):
             scheduler.step(meta_a['loss'])
 
             # Extract the held out database
-            _metric = held_out_results[DATA_LABEL_VAL][best_metric] 
+            _metric = meta_a['loss'] 
             
             # Check if the metric has improved over the last best
-            if _metric > best:
+            if _metric < best:
                 best = _metric
                 best_train = meta
                 best_test = held_out_results[DATA_LABEL_TEST]
                 best_valid = held_out_results[DATA_LABEL_VAL]
+                
+                # Reset the patience
+                stopping_patience = 2
+            else:
+                # Reduce and break
+                stopping_patience -= 1
+                if stopping_patience == 0:
+                    break
                 
         # Save the best data across all the epochs
         list_data_train.append([num_layers, best_train['loss'], best_train['bacc'], best_train['auroc'], best_train['f1_score'], best_train['GDR'], best_train['IIG']])
