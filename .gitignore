@@ -1,6 +1,6 @@
-data
 .ipynb_checkpoints
 __pycache__/
 *.py[cod]
 junk
+datav1
 sampling_comparison
