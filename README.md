@@ -67,3 +67,17 @@ The visualization code is seperated into two file.
 
 1. For result Visulaiztions we use the result_visualization.ipynb or result_visualization_seperate.ipynb file.
 2. For smoothness metric analysis run the gdr_iig_analysis.ipynb file to visualize both of these metrics.
+
+## Runtime Analysis of different sampling methods
+The following run time was calculated for each sampling method on the same graph across 100 fraudulent nodes
+
+| Sampling Method  | Runtime (ms) |
+| ------------- | ------------- |
+| BFS  | 538.64 |
+| RFS  | 89.74  |
+| FS  | 142.78  |
+| MHRW  | 70.31  |
+| BFRON  | 444.28  |
+
+## Raw Scores for all sampling methods and models
+![raw_scores](https://github.com/user-attachments/assets/9ed10d51-2090-46fe-ad40-e0957500b316)
