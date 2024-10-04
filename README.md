@@ -78,3 +78,6 @@ The following run time was calculated for each sampling method on the same graph
 | FS  | 142.78  |
 | MHRW  | 70.31  |
 | BFRON  | 444.28  |
+
+## Raw Scores for all sampling methods and models
+![raw_scores](https://github.com/user-attachments/assets/9ed10d51-2090-46fe-ad40-e0957500b316)
